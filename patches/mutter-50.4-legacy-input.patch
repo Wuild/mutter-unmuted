@@ -1,0 +1,1243 @@
+diff --git a/data/org.gnome.mutter.wayland.gschema.xml.in b/data/org.gnome.mutter.wayland.gschema.xml.in
+index c4dde1d..2f6996f 100644
+--- a/data/org.gnome.mutter.wayland.gschema.xml.in
++++ b/data/org.gnome.mutter.wayland.gschema.xml.in
+@@ -1,5 +1,12 @@
+ <schemalist>
+ 
++  <enum id="org.gnome.mutter.XwaylandLegacyKeyboardMode">
++    <value nick="disabled" value="0"/>
++    <value nick="non-character" value="1"/>
++    <value nick="modifiers" value="2"/>
++    <value nick="all" value="3"/>
++  </enum>
++
+   <flags id="org.gnome.mutter.MetaXwaylandDisableExtension">
+     <value nick="Security" value="1"/>
+     <value nick="Xtest" value="2"/>
+@@ -65,6 +72,36 @@
+   <schema id="org.gnome.mutter.wayland" path="/org/gnome/mutter/wayland/"
+           gettext-domain="@GETTEXT_DOMAIN@">
+ 
++    <key name="xwayland-legacy-pointer-buttons" type="b">
++      <default>false</default>
++      <summary>Expose extra pointer buttons to legacy X11 applications</summary>
++      <description>
++        Forward extra mouse buttons (side, extra, forward, back and task)
++        to Xwayland throughout the unlocked session, including the desktop,
++        overview, app grid and menus.
++        Left, middle, right and scroll events are not forwarded. All X11
++        applications on that server may observe forwarded events. Normal
++        input delivery is preserved. GNOME Shell lock-screen and greeter
++        remote-access inhibition blocks forwarding and cancels held inputs.
++        Changing this setting also cancels held inputs.
++      </description>
++    </key>
++
++    <key name="xwayland-legacy-keyboard-mode"
++         enum="org.gnome.mutter.XwaylandLegacyKeyboardMode">
++      <default>'disabled'</default>
++      <summary>Keyboard input exposed to legacy X11 applications</summary>
++      <description>
++        Forward selected keys to Xwayland throughout the unlocked session,
++        including Shell UI. Modes are disabled, non-character keys, those
++        keys plus any key pressed with Ctrl/Alt/Super, or all keys.
++        All mode exposes typed text to all applications on the shared X11
++        server. Compositor shortcuts still function. GNOME Shell lock-screen
++        and greeter remote-access inhibition blocks forwarding and cancels
++        held inputs. Changing this setting also cancels held inputs.
++      </description>
++    </key>
++
+     <key name="xwayland-allow-grabs" type="b">
+       <default>false</default>
+       <summary>Allow X11 grabs to lock keyboard focus with Xwayland</summary>
+diff --git a/src/backends/meta-remote-access-controller-private.h b/src/backends/meta-remote-access-controller-private.h
+index a738e68..1b1fe69 100644
+--- a/src/backends/meta-remote-access-controller-private.h
++++ b/src/backends/meta-remote-access-controller-private.h
+@@ -33,3 +33,6 @@ void meta_remote_access_handle_notify_stopped (MetaRemoteAccessHandle *handle);
+ 
+ void meta_remote_access_handle_set_disable_animations (MetaRemoteAccessHandle *handle,
+                                                        gboolean                disable_animations);
++
++/* GNOME Shell synchronously inhibits remote access in unlock-dialog mode. */
++gboolean meta_remote_access_controller_is_inhibited (MetaRemoteAccessController *controller);
+diff --git a/src/backends/meta-remote-access-controller.c b/src/backends/meta-remote-access-controller.c
+index 82a25c8..eb3c417 100644
+--- a/src/backends/meta-remote-access-controller.c
++++ b/src/backends/meta-remote-access-controller.c
+@@ -50,6 +50,7 @@ static GParamSpec *obj_props[N_PROPS];
+ enum
+ {
+   CONTROLLER_NEW_HANDLE,
++  CONTROLLER_INHIBITION_CHANGED,
+ 
+   N_CONTROLLER_SIGNALS
+ };
+@@ -74,6 +75,7 @@ struct _MetaRemoteAccessController
+   GObject parent;
+ 
+   GList *session_managers;
++  unsigned int inhibit_count;
+ };
+ 
+ G_DEFINE_TYPE (MetaRemoteAccessController,
+@@ -154,6 +156,11 @@ meta_remote_access_controller_inhibit_remote_access (MetaRemoteAccessController
+ {
+   GList *l;
+ 
++  /* Notify input forwarding before any lock-screen input can be dispatched. */
++  if (controller->inhibit_count++ == 0)
++    g_signal_emit (controller, controller_signals[CONTROLLER_INHIBITION_CHANGED],
++                   0, TRUE);
++
+   for (l = controller->session_managers; l; l = l->next)
+     {
+       MetaDbusSessionManager *session_manager = l->data;
+@@ -175,6 +182,12 @@ meta_remote_access_controller_uninhibit_remote_access (MetaRemoteAccessControlle
+ {
+   GList *l;
+ 
++  g_return_if_fail (controller->inhibit_count > 0);
++  controller->inhibit_count--;
++  if (controller->inhibit_count == 0)
++    g_signal_emit (controller, controller_signals[CONTROLLER_INHIBITION_CHANGED],
++                   0, FALSE);
++
+   for (l = controller->session_managers; l; l = l->next)
+     {
+       MetaDbusSessionManager *session_manager = l->data;
+@@ -183,6 +196,12 @@ meta_remote_access_controller_uninhibit_remote_access (MetaRemoteAccessControlle
+     }
+ }
+ 
++gboolean
++meta_remote_access_controller_is_inhibited (MetaRemoteAccessController *controller)
++{
++  return controller->inhibit_count > 0;
++}
++
+ MetaRemoteAccessController *
+ meta_remote_access_controller_new (void)
+ {
+@@ -291,6 +310,11 @@ meta_remote_access_controller_class_init (MetaRemoteAccessControllerClass *klass
+ 
+   object_class->finalize = meta_remote_access_handle_finalize;
+ 
++  controller_signals[CONTROLLER_INHIBITION_CHANGED] =
++    g_signal_new ("inhibition-changed", G_TYPE_FROM_CLASS (klass),
++                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
++                  G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
++
+   controller_signals[CONTROLLER_NEW_HANDLE] =
+     g_signal_new ("new-handle",
+                   G_TYPE_FROM_CLASS (klass),
+diff --git a/src/tests/meson.build b/src/tests/meson.build
+index 1bcad75..58e02bc 100644
+--- a/src/tests/meson.build
++++ b/src/tests/meson.build
+@@ -1227,6 +1227,12 @@ if have_xwayland
+         'xwayland-tests.c',
+       ],
+     },
++    {
++      'name': 'xwayland-legacy-input',
++      'suite': 'wayland',
++      'depends': [test_client, x11_frames],
++      'sources': ['xwayland-legacy-input-tests.c'],
++    },
+   ]
+ endif
+ 
+diff --git a/src/tests/xwayland-legacy-input-tests.c b/src/tests/xwayland-legacy-input-tests.c
+new file mode 100644
+index 0000000..820b7a9
+--- /dev/null
++++ b/src/tests/xwayland-legacy-input-tests.c
+@@ -0,0 +1,504 @@
++/*
++ * Copyright (C) 2022 Red Hat Inc.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, see <http://www.gnu.org/licenses/>.
++ *
++ */
++
++#include "config.h"
++
++#include <X11/extensions/XInput2.h>
++#include <linux/input-event-codes.h>
++#include "wayland/meta-wayland-keyboard.h"
++#include "wayland/meta-wayland-surface-private.h"
++
++#include "backends/meta-virtual-monitor.h"
++#include "meta/meta-backend.h"
++#include "meta/meta-remote-access-controller.h"
++#include "meta/window.h"
++#include "wayland/meta-wayland-private.h"
++#include "wayland/meta-wayland-pointer.h"
++#include "wayland/meta-wayland-seat.h"
++
++#include "meta/meta-selection.h"
++#include "meta-test/meta-context-test.h"
++#include "tests/meta-test-utils.h"
++#include "wayland/meta-wayland.h"
++#include "wayland/meta-xwayland.h"
++#include "x11/meta-x11-display-private.h"
++
++static MetaContext *test_context;
++
++static void
++test_client_do_check (MetaTestClient *test_client,
++                      ...)
++{
++  g_autoptr (GError) error = NULL;
++  va_list vap;
++  gboolean retval;
++
++  va_start (vap, test_client);
++  retval = meta_test_client_dov (test_client, &error, vap);
++  va_end (vap);
++
++  if (!retval)
++    g_error ("Failed to process test client command: %s", error->message);
++}
++
++static void
++test_client_wait_check (MetaTestClient *test_client)
++{
++  g_autoptr (GError) error = NULL;
++
++  if (!meta_test_client_wait (test_client, &error))
++    g_error ("Failed to wait for test client: %s", error->message);
++}
++
++static void
++ensure_xwayland (MetaContext *context)
++{
++  MetaDisplay *display = meta_context_get_display (test_context);
++
++  if (meta_display_get_x11_display (display))
++    return;
++
++  while (!meta_display_get_x11_display (display))
++    g_main_context_iteration (NULL, TRUE);
++}
++
++/* Observe actual XI2 raw events from the real Xwayland process while a
++ * native Wayland window owns pointer focus. This exercises the protocol
++ * delivery path rather than only testing a forwarding decision. */
++static void
++assert_raw_events (Display *xdisplay,
++                   int      opcode,
++                   int      detail,
++                   int      press_type,
++                   int      release_type,
++                   int      expected_presses,
++                    int      expected_releases)
++{
++  gint64 deadline = g_get_monotonic_time () + 200 * 1000;
++  int presses = 0, releases = 0;
++
++  do
++    {
++      while (g_main_context_iteration (NULL, FALSE));
++      while (XPending (xdisplay))
++        {
++          XEvent event;
++
++          XNextEvent (xdisplay, &event);
++          if (event.type == GenericEvent &&
++              event.xcookie.extension == opcode &&
++              XGetEventData (xdisplay, &event.xcookie))
++            {
++              XIRawEvent *raw = event.xcookie.data;
++
++              if (detail == 0 || raw->detail == detail)
++                {
++                  presses += event.xcookie.evtype == press_type;
++                  releases += event.xcookie.evtype == release_type;
++                }
++              XFreeEventData (xdisplay, &event.xcookie);
++            }
++        }
++      g_usleep (1000);
++    }
++  while (g_get_monotonic_time () < deadline);
++
++  g_assert_cmpint (presses, ==, expected_presses);
++  g_assert_cmpint (releases, ==, expected_releases);
++}
++
++static void
++assert_raw_buttons (Display *display,
++                    int      opcode,
++                    int      presses,
++                    int      releases)
++{
++  assert_raw_events (display, opcode, 0, XI_RawButtonPress, XI_RawButtonRelease,
++                     presses, releases);
++}
++
++static void
++send_test_key (ClutterVirtualInputDevice *device,
++               uint32_t                   key,
++               ClutterKeyState            state)
++{
++  clutter_virtual_input_device_notify_key (device, CLUTTER_CURRENT_TIME, key, state);
++  meta_flush_input (test_context);
++}
++
++static void
++meta_test_xwayland_legacy_input (void)
++{
++  MetaBackend *backend = meta_context_get_backend (test_context);
++  MetaWaylandCompositor *compositor =
++    meta_context_get_wayland_compositor (test_context);
++  g_autoptr (ClutterVirtualInputDevice) device = NULL;
++  g_autoptr (ClutterVirtualInputDevice) keyboard = NULL;
++  ClutterGrab *grab;
++  MetaRemoteAccessController *controller =
++    meta_backend_get_remote_access_controller (backend);
++  ClutterStage *stage = CLUTTER_STAGE (meta_backend_get_stage (backend));
++  g_autoptr (GSettings) settings = NULL;
++  g_autoptr (GError) error = NULL;
++  MetaTestClient *xclient, *native;
++  g_autoptr (MetaVirtualMonitor) monitor = NULL;
++  MetaWindow *window;
++  MtkRectangle rect;
++  Display *xdisplay;
++  int opcode, event_base, error_base;
++  int major = 2, minor = 2;
++  unsigned char bits[XIMaskLen (XI_RawButtonRelease)] = { 0 };
++  XIEventMask mask = { XIAllMasterDevices, sizeof (bits), bits };
++
++  monitor = meta_create_test_monitor (test_context, 800, 600, 60.0);
++  settings = g_settings_new ("org.gnome.mutter.wayland");
++  g_settings_set_boolean (settings, "xwayland-legacy-pointer-buttons", FALSE);
++  xclient = meta_test_client_new (test_context, "legacy-x11",
++                                  META_WINDOW_CLIENT_TYPE_X11, &error);
++  g_assert_no_error (error);
++  test_client_do_check (xclient, "create", "1", NULL);
++  test_client_do_check (xclient, "show", "1", NULL);
++  test_client_wait_check (xclient);
++  ensure_xwayland (test_context);
++
++  xdisplay = XOpenDisplay (meta_wayland_get_public_xwayland_display_name (compositor));
++  g_assert_nonnull (xdisplay);
++  g_assert_true (XQueryExtension (xdisplay, "XInputExtension", &opcode,
++                                  &event_base, &error_base));
++  g_assert_cmpint (XIQueryVersion (xdisplay, &major, &minor), ==, Success);
++  XISetMask (bits, XI_RawButtonPress);
++  XISetMask (bits, XI_RawButtonRelease);
++  XISetMask (bits, XI_RawKeyPress);
++  XISetMask (bits, XI_RawKeyRelease);
++  XISelectEvents (xdisplay, DefaultRootWindow (xdisplay), &mask, 1);
++  XSync (xdisplay, False);
++
++  native = meta_test_client_new (test_context, "legacy-native",
++                                 META_WINDOW_CLIENT_TYPE_WAYLAND, &error);
++  g_assert_no_error (error);
++  test_client_do_check (native, "create", "1", NULL);
++  test_client_do_check (native, "show", "1", NULL);
++  test_client_do_check (native, "activate", "1", NULL);
++  test_client_wait_check (native);
++  window = meta_test_client_find_window (native, "1", &error);
++  g_assert_no_error (error);
++  meta_wait_for_window_shown (window);
++  meta_window_move_frame (window, FALSE, 0, 0);
++  meta_wait_for_presented (test_context);
++  meta_window_get_buffer_rect (window, &rect);
++  device = clutter_seat_create_virtual_device (
++    meta_backend_get_default_seat (backend), CLUTTER_POINTER_DEVICE);
++  clutter_virtual_input_device_notify_absolute_motion (
++    device, CLUTTER_CURRENT_TIME, rect.x + rect.width / 2,
++    rect.y + rect.height / 2);
++  meta_flush_input (test_context);
++  meta_wait_for_presented (test_context);
++  g_assert_true (meta_wayland_surface_get_window (
++    meta_wayland_pointer_get_focus_surface (compositor->seat->pointer)) == window);
++
++  /* Default-off must not leak button events. */
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_PRESSED);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_RELEASED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 0, 0);
++
++  g_settings_set_boolean (settings, "xwayland-legacy-pointer-buttons", TRUE);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_PRESSED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 1, 0);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_RELEASED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 0, 1);
++
++  /* Changing the setting while held must release, and the later physical
++   * release must not create an extra X11 event. */
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_PRESSED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 1, 0);
++  g_settings_set_boolean (settings, "xwayland-legacy-pointer-buttons", FALSE);
++  assert_raw_buttons (xdisplay, opcode, 0, 1);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_RELEASED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 0, 0);
++
++  /* All extra mouse buttons, including simultaneous holds. */
++  g_settings_set_boolean (settings, "xwayland-legacy-pointer-buttons", TRUE);
++  for (uint32_t button = 8; button <= 12; button++)
++    clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                                button, CLUTTER_BUTTON_STATE_PRESSED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 5, 0);
++  for (uint32_t button = 8; button <= 12; button++)
++    clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                                button, CLUTTER_BUTTON_STATE_RELEASED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 0, 5);
++
++  /* Desktop has no Wayland surface, but must still support PTT. */
++  clutter_virtual_input_device_notify_absolute_motion (device, CLUTTER_CURRENT_TIME,
++                                                       799, 599);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 0, 0);
++  g_assert_null (meta_wayland_pointer_get_focus_surface (compositor->seat->pointer));
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_PRESSED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 1, 0);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_RELEASED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 0, 1);
++
++  /* Overview/app-grid grabs must preserve holds even on the desktop. */
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_PRESSED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 1, 0);
++  grab = clutter_stage_grab (stage, CLUTTER_ACTOR (stage));
++  assert_raw_buttons (xdisplay, opcode, 0, 0);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_RELEASED);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_PRESSED);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_RELEASED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 1, 2);
++  clutter_grab_dismiss (grab);
++
++  /* Moving across the desktop must not end a native-window hold. */
++  clutter_virtual_input_device_notify_absolute_motion (
++    device, CLUTTER_CURRENT_TIME, rect.x + rect.width / 2, rect.y + rect.height / 2);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 0, 0);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_PRESSED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 1, 0);
++  clutter_virtual_input_device_notify_absolute_motion (device, CLUTTER_CURRENT_TIME,
++                                                       799, 599);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 0, 0);
++  g_assert_null (meta_wayland_pointer_get_focus_surface (compositor->seat->pointer));
++  clutter_virtual_input_device_notify_absolute_motion (
++    device, CLUTTER_CURRENT_TIME, rect.x + rect.width / 2, rect.y + rect.height / 2);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_RELEASED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 0, 1);
++
++  /* Primary buttons must never be exposed in the background. */
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              1, CLUTTER_BUTTON_STATE_PRESSED);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              1, CLUTTER_BUTTON_STATE_RELEASED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 0, 0);
++
++  /* Unlocked Shell menus/grabs must also receive new presses. */
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_PRESSED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 1, 0);
++  grab = clutter_stage_grab (stage, CLUTTER_ACTOR (stage));
++  assert_raw_buttons (xdisplay, opcode, 0, 0);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_RELEASED);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_PRESSED);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_RELEASED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 1, 2);
++  clutter_grab_dismiss (grab);
++
++  keyboard = clutter_seat_create_virtual_device (
++    meta_backend_get_default_seat (backend), CLUTTER_KEYBOARD_DEVICE);
++  meta_flush_input (test_context);
++  test_client_do_check (native, "activate", "1", NULL);
++  test_client_wait_check (native);
++  assert_raw_events (xdisplay, opcode, 0, XI_RawKeyPress, XI_RawKeyRelease, 0, 0);
++  g_assert_nonnull (meta_wayland_keyboard_get_focus_surface (compositor->seat->keyboard));
++  g_assert_true (meta_wayland_surface_get_window (
++    meta_wayland_keyboard_get_focus_surface (compositor->seat->keyboard)) == window);
++
++  /* Disabled and non-character modes must not expose typed letters. */
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_PRESSED);
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_RELEASED);
++  assert_raw_events (xdisplay, opcode, 0, XI_RawKeyPress, XI_RawKeyRelease, 0, 0);
++  g_settings_set_string (settings, "xwayland-legacy-keyboard-mode", "non-character");
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_PRESSED);
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_RELEASED);
++  assert_raw_events (xdisplay, opcode, 0, XI_RawKeyPress, XI_RawKeyRelease, 0, 0);
++  send_test_key (keyboard, KEY_F8, CLUTTER_KEY_STATE_PRESSED);
++  send_test_key (keyboard, KEY_F8, CLUTTER_KEY_STATE_RELEASED);
++  assert_raw_events (xdisplay, opcode, KEY_F8 + 8, XI_RawKeyPress, XI_RawKeyRelease, 1, 1);
++
++  /* Ctrl+A is forwarded in modifier mode, including A-up after Ctrl-up. */
++  g_settings_set_string (settings, "xwayland-legacy-keyboard-mode", "modifiers");
++  send_test_key (keyboard, KEY_LEFTCTRL, CLUTTER_KEY_STATE_PRESSED);
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_PRESSED);
++  assert_raw_events (xdisplay, opcode, KEY_A + 8, XI_RawKeyPress, XI_RawKeyRelease, 1, 0);
++  send_test_key (keyboard, KEY_LEFTCTRL, CLUTTER_KEY_STATE_RELEASED);
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_RELEASED);
++  assert_raw_events (xdisplay, opcode, KEY_A + 8, XI_RawKeyPress, XI_RawKeyRelease, 0, 1);
++
++  g_settings_set_string (settings, "xwayland-legacy-keyboard-mode", "all");
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_PRESSED);
++  assert_raw_events (xdisplay, opcode, KEY_A + 8, XI_RawKeyPress, XI_RawKeyRelease, 1, 0);
++  grab = clutter_stage_grab (stage, CLUTTER_ACTOR (stage));
++  assert_raw_events (xdisplay, opcode, KEY_A + 8, XI_RawKeyPress, XI_RawKeyRelease, 0, 0);
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_RELEASED);
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_PRESSED);
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_RELEASED);
++  assert_raw_events (xdisplay, opcode, KEY_A + 8, XI_RawKeyPress, XI_RawKeyRelease, 1, 2);
++
++  /* GNOME Shell calls this controller synchronously when entering locked
++   * session mode. It must cancel held input and block authentication input. */
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_PRESSED);
++  assert_raw_events (xdisplay, opcode, KEY_A + 8, XI_RawKeyPress, XI_RawKeyRelease, 1, 0);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_PRESSED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 1, 0);
++  g_assert_nonnull (controller);
++  meta_remote_access_controller_inhibit_remote_access (controller);
++  meta_remote_access_controller_inhibit_remote_access (controller);
++  /* Check cancellation of the held key; the observer drains mouse events too. */
++  assert_raw_events (xdisplay, opcode, KEY_A + 8, XI_RawKeyPress, XI_RawKeyRelease, 0, 1);
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_RELEASED);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_RELEASED);
++  meta_flush_input (test_context);
++  assert_raw_events (xdisplay, opcode, 0, XI_RawKeyPress, XI_RawKeyRelease, 0, 0);
++
++  /* A nested inhibition must stay blocked until the last inhibitor leaves. */
++  for (int remaining = 2; remaining > 0; remaining--)
++    {
++      send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_PRESSED);
++      send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_RELEASED);
++      assert_raw_events (xdisplay, opcode, 0, XI_RawKeyPress, XI_RawKeyRelease, 0, 0);
++      clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                                  9, CLUTTER_BUTTON_STATE_PRESSED);
++      clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                                  9, CLUTTER_BUTTON_STATE_RELEASED);
++      meta_flush_input (test_context);
++      assert_raw_buttons (xdisplay, opcode, 0, 0);
++      meta_remote_access_controller_uninhibit_remote_access (controller);
++    }
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_PRESSED);
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_RELEASED);
++  assert_raw_events (xdisplay, opcode, KEY_A + 8, XI_RawKeyPress, XI_RawKeyRelease, 1, 1);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_PRESSED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 1, 0);
++  meta_remote_access_controller_inhibit_remote_access (controller);
++  assert_raw_buttons (xdisplay, opcode, 0, 1);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_RELEASED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 0, 0);
++  meta_remote_access_controller_uninhibit_remote_access (controller);
++  clutter_grab_dismiss (grab);
++
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_PRESSED);
++  assert_raw_events (xdisplay, opcode, KEY_A + 8, XI_RawKeyPress, XI_RawKeyRelease, 1, 0);
++  g_settings_set_string (settings, "xwayland-legacy-keyboard-mode", "disabled");
++  assert_raw_events (xdisplay, opcode, KEY_A + 8, XI_RawKeyPress, XI_RawKeyRelease, 0, 1);
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_RELEASED);
++  assert_raw_events (xdisplay, opcode, KEY_A + 8, XI_RawKeyPress, XI_RawKeyRelease, 0, 0);
++
++  g_test_message ("Testing focused Xwayland for duplicate events");
++  /* Focused Xwayland must get one normal event, never a duplicate. */
++  test_client_do_check (xclient, "activate", "1", NULL);
++  test_client_wait_check (xclient);
++  window = meta_test_client_find_window (xclient, "1", &error);
++  g_assert_no_error (error);
++  meta_window_move_frame (window, FALSE, 0, 0);
++  meta_wait_for_presented (test_context);
++  meta_window_get_buffer_rect (window, &rect);
++  clutter_virtual_input_device_notify_absolute_motion (
++    device, CLUTTER_CURRENT_TIME, rect.x + rect.width / 2, rect.y + rect.height / 2);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 0, 0);
++  g_assert_true (meta_wayland_surface_get_window (
++    meta_wayland_pointer_get_focus_surface (compositor->seat->pointer)) == window);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_PRESSED);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_RELEASED);
++  meta_flush_input (test_context);
++  g_test_message ("Checking focused Xwayland mouse pair");
++  assert_raw_buttons (xdisplay, opcode, 1, 1);
++  g_settings_set_string (settings, "xwayland-legacy-keyboard-mode", "all");
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_PRESSED);
++  send_test_key (keyboard, KEY_A, CLUTTER_KEY_STATE_RELEASED);
++  g_test_message ("Checking focused Xwayland keyboard pair");
++  assert_raw_events (xdisplay, opcode, KEY_A + 8, XI_RawKeyPress, XI_RawKeyRelease, 1, 1);
++
++  g_test_message ("Testing Xwayland-to-native held-button transition");
++  /* Hold an X11-delivered button while moving back to a native window. */
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_PRESSED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 1, 0);
++  test_client_do_check (native, "activate", "1", NULL);
++  test_client_wait_check (native);
++  window = meta_test_client_find_window (native, "1", &error);
++  g_assert_no_error (error);
++  meta_window_move_frame (window, FALSE, 0, 0);
++  meta_wait_for_presented (test_context);
++  meta_window_get_buffer_rect (window, &rect);
++  clutter_virtual_input_device_notify_absolute_motion (
++    device, CLUTTER_CURRENT_TIME, rect.x + rect.width / 2, rect.y + rect.height / 2);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_RELEASED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 0, 1);
++
++  g_settings_set_string (settings, "xwayland-legacy-keyboard-mode", "disabled");
++  g_settings_set_boolean (settings, "xwayland-legacy-pointer-buttons", FALSE);
++  XCloseDisplay (xdisplay);
++  meta_test_client_destroy (native);
++  meta_test_client_destroy (xclient);
++}
++
++int
++main (int    argc,
++      char **argv)
++{
++  g_autoptr (MetaContext) context = NULL;
++
++  context = test_context =
++    meta_create_test_context (META_CONTEXT_TEST_TYPE_HEADLESS,
++                              META_CONTEXT_TEST_FLAG_TEST_CLIENT);
++  g_assert_true (meta_context_configure (context, &argc, &argv, NULL));
++
++  g_test_add_func ("/backends/xwayland/legacy/input",
++                   meta_test_xwayland_legacy_input);
++
++  return meta_context_test_run_tests (META_CONTEXT_TEST (context),
++                                      META_TEST_RUN_FLAG_NONE);
++}
+diff --git a/src/wayland/meta-wayland-keyboard.c b/src/wayland/meta-wayland-keyboard.c
+index 8d7849c..59d7d2d 100644
+--- a/src/wayland/meta-wayland-keyboard.c
++++ b/src/wayland/meta-wayland-keyboard.c
+@@ -52,6 +52,7 @@
+ #include <unistd.h>
+ 
+ #include "backends/meta-backend-private.h"
++#include "backends/meta-remote-access-controller-private.h"
+ #include "core/display-private.h"
+ #include "mtk/mtk.h"
+ #include "wayland/meta-wayland-private.h"
+@@ -89,6 +90,13 @@ struct _MetaWaylandKeyboard
+ 
+   MetaWaylandXkbInfo xkb_info;
+   GSettings *settings;
++#ifdef HAVE_XWAYLAND
++  GSettings *legacy_settings;
++  int legacy_mode;
++  GHashTable *legacy_keys;
++  struct wl_client *legacy_client;
++  struct wl_listener legacy_client_destroyed;
++#endif
+ };
+ 
+ G_DEFINE_TYPE (MetaWaylandKeyboard, meta_wayland_keyboard,
+@@ -108,6 +116,186 @@ backend_from_keyboard (MetaWaylandKeyboard *keyboard)
+   return meta_context_get_backend (context);
+ }
+ 
++#ifdef HAVE_XWAYLAND
++static void
++legacy_keyboard_forget_client (MetaWaylandKeyboard *keyboard)
++{
++  if (keyboard->legacy_client)
++    {
++      wl_list_remove (&keyboard->legacy_client_destroyed.link);
++      keyboard->legacy_client = NULL;
++    }
++  g_hash_table_remove_all (keyboard->legacy_keys);
++}
++
++static void
++legacy_keyboard_client_destroyed (struct wl_listener *listener,
++                                  void               *data)
++{
++  MetaWaylandKeyboard *keyboard =
++    wl_container_of (listener, keyboard, legacy_client_destroyed);
++
++  legacy_keyboard_forget_client (keyboard);
++}
++
++static gboolean
++send_legacy_key (MetaWaylandKeyboard *keyboard,
++                 struct wl_client    *client,
++                 uint32_t             key,
++                 uint32_t             time,
++                 uint32_t             state)
++{
++  struct wl_resource *resource;
++  uint32_t serial = meta_wayland_input_device_next_serial (
++    META_WAYLAND_INPUT_DEVICE (keyboard));
++  struct xkb_state *xkb = keyboard->xkb_info.state;
++  gboolean sent = FALSE;
++
++  /* Xwayland is only in this list while it lacks keyboard focus. */
++  wl_resource_for_each (resource, &keyboard->resource_list)
++    {
++      if (wl_resource_get_client (resource) != client)
++        continue;
++
++      wl_keyboard_send_key (resource, serial, time, key, state);
++      wl_keyboard_send_modifiers (
++        resource, serial,
++        xkb_state_serialize_mods (xkb, XKB_STATE_MODS_DEPRESSED),
++        xkb_state_serialize_mods (xkb, XKB_STATE_MODS_LATCHED),
++        xkb_state_serialize_mods (xkb, XKB_STATE_MODS_LOCKED),
++        xkb_state_serialize_layout (xkb, XKB_STATE_LAYOUT_EFFECTIVE));
++      sent = TRUE;
++    }
++  return sent;
++}
++
++static void
++cancel_legacy_keys (MetaWaylandKeyboard *keyboard)
++{
++  GHashTableIter iter;
++  gpointer key;
++  struct wl_resource *resource;
++  uint32_t serial;
++
++  if (!keyboard->legacy_client)
++    return;
++
++  g_hash_table_iter_init (&iter, keyboard->legacy_keys);
++  while (g_hash_table_iter_next (&iter, &key, NULL))
++    send_legacy_key (keyboard, keyboard->legacy_client, GPOINTER_TO_UINT (key),
++                     (uint32_t) (g_get_monotonic_time () / 1000),
++                     WL_KEYBOARD_KEY_STATE_RELEASED);
++
++  /* Do not leave depressed modifiers behind when forwarding stops. Normal
++   * focus entry restores the real modifier state if Xwayland gains focus. */
++  serial = meta_wayland_input_device_next_serial (META_WAYLAND_INPUT_DEVICE (keyboard));
++  wl_resource_for_each (resource, &keyboard->resource_list)
++    if (wl_resource_get_client (resource) == keyboard->legacy_client)
++      wl_keyboard_send_modifiers (resource, serial, 0, 0, 0, 0);
++
++  legacy_keyboard_forget_client (keyboard);
++}
++
++static gboolean
++legacy_keyboard_is_inhibited (MetaWaylandKeyboard *keyboard)
++{
++  MetaRemoteAccessController *controller =
++    meta_backend_get_remote_access_controller (backend_from_keyboard (keyboard));
++
++  return !controller || meta_remote_access_controller_is_inhibited (controller);
++}
++
++static void
++legacy_keyboard_inhibition_changed (MetaRemoteAccessController *controller,
++                                    gboolean                    inhibited,
++                                    MetaWaylandKeyboard        *keyboard)
++{
++  if (inhibited)
++    cancel_legacy_keys (keyboard);
++}
++
++static void
++legacy_keyboard_setting_changed (GSettings           *settings,
++                                 const char          *key,
++                                 MetaWaylandKeyboard *keyboard)
++{
++  cancel_legacy_keys (keyboard);
++  keyboard->legacy_mode = g_settings_get_enum (settings,
++                                               "xwayland-legacy-keyboard-mode");
++}
++
++static gboolean
++is_legacy_non_character_key (xkb_keysym_t sym)
++{
++  /* Include control/navigation/function/modifier/media keys, but exclude
++   * Compose, input-method keys, dead keys and printable keypad characters. */
++  if (sym == XKB_KEY_NoSymbol || sym == XKB_KEY_Multi_key ||
++      (sym >= XKB_KEY_Kanji && sym <= XKB_KEY_Eisu_toggle) ||
++      (sym >= XKB_KEY_Hangul && sym <= XKB_KEY_Hangul_Special) ||
++      (sym >= XKB_KEY_dead_grave && sym <= XKB_KEY_dead_currency) ||
++      (sym >= XKB_KEY_dead_a && sym <= XKB_KEY_dead_greek) ||
++      (sym >= XKB_KEY_dead_lowline && sym <= XKB_KEY_dead_longsolidusoverlay))
++    return FALSE;
++
++  if ((sym >= XKB_KEY_BackSpace && sym <= XKB_KEY_Escape) ||
++      sym == XKB_KEY_Delete || sym == XKB_KEY_KP_Tab ||
++      sym == XKB_KEY_KP_Enter)
++    return TRUE;
++
++  return xkb_keysym_to_utf32 (sym) == 0;
++}
++
++static void
++maybe_send_legacy_key (MetaWaylandKeyboard *keyboard,
++                       const ClutterEvent  *event)
++{
++  MetaWaylandSeat *seat = meta_wayland_input_device_get_seat (
++    META_WAYLAND_INPUT_DEVICE (keyboard));
++  MetaWaylandCompositor *compositor = meta_wayland_seat_get_compositor (seat);
++  struct wl_client *client = compositor->xwayland_manager.client;
++  uint32_t key = clutter_event_get_event_code (event);
++  uint32_t time = clutter_event_get_time (event);
++  ClutterModifierType modifiers = clutter_event_get_state (event);
++  gboolean permitted;
++
++  if (clutter_event_get_flags (event) & (CLUTTER_EVENT_FLAG_REPEATED |
++                                        CLUTTER_EVENT_FLAG_SYNTHETIC))
++    return;
++
++  if (clutter_event_type (event) == CLUTTER_KEY_RELEASE)
++    {
++      /* Pair a forwarded press even when its modifiers have since changed. */
++      if (g_hash_table_remove (keyboard->legacy_keys, GUINT_TO_POINTER (key)))
++        send_legacy_key (keyboard, keyboard->legacy_client, key, time,
++                         WL_KEYBOARD_KEY_STATE_RELEASED);
++      return;
++    }
++
++  if (!keyboard->legacy_mode || !client || legacy_keyboard_is_inhibited (keyboard) ||
++      (keyboard->focus_surface &&
++       wl_resource_get_client (keyboard->focus_surface->resource) == client) ||
++      g_hash_table_contains (keyboard->legacy_keys, GUINT_TO_POINTER (key)))
++    return;
++
++  permitted = keyboard->legacy_mode == 3 ||
++    is_legacy_non_character_key (clutter_event_get_key_symbol (event)) ||
++    (keyboard->legacy_mode == 2 &&
++     (modifiers & (CLUTTER_CONTROL_MASK | CLUTTER_MOD1_MASK | CLUTTER_SUPER_MASK)));
++  if (!permitted)
++    return;
++
++  if (!send_legacy_key (keyboard, client, key, time, WL_KEYBOARD_KEY_STATE_PRESSED))
++    return;
++
++  if (!keyboard->legacy_client)
++    {
++      keyboard->legacy_client = client;
++      wl_client_add_destroy_listener (client, &keyboard->legacy_client_destroyed);
++    }
++  g_hash_table_add (keyboard->legacy_keys, GUINT_TO_POINTER (key));
++}
++#endif
++
+ static void
+ unbind_resource (struct wl_resource *resource)
+ {
+@@ -441,6 +629,13 @@ meta_wayland_keyboard_enable (MetaWaylandKeyboard *keyboard)
+   MetaWaylandSeat *seat = meta_wayland_input_device_get_seat (input_device);
+   MetaBackend *backend = backend_from_keyboard (keyboard);
+ 
++#ifdef HAVE_XWAYLAND
++  if (meta_backend_get_remote_access_controller (backend))
++    g_signal_connect (meta_backend_get_remote_access_controller (backend),
++                      "inhibition-changed",
++                      G_CALLBACK (legacy_keyboard_inhibition_changed), keyboard);
++#endif
++
+   keyboard->settings = g_settings_new ("org.gnome.desktop.peripherals.keyboard");
+ 
+   wl_array_init (&keyboard->pressed_keys);
+@@ -474,6 +669,14 @@ meta_wayland_keyboard_disable (MetaWaylandKeyboard *keyboard)
+ {
+   MetaBackend *backend = backend_from_keyboard (keyboard);
+ 
++#ifdef HAVE_XWAYLAND
++  if (meta_backend_get_remote_access_controller (backend))
++    g_signal_handlers_disconnect_by_func (
++      meta_backend_get_remote_access_controller (backend),
++      legacy_keyboard_inhibition_changed, keyboard);
++  cancel_legacy_keys (keyboard);
++#endif
++
+   g_signal_handlers_disconnect_by_func (backend, on_keymap_changed, keyboard);
+   g_signal_handlers_disconnect_by_func (backend, on_keymap_layout_group_changed, keyboard);
+ 
+@@ -604,6 +807,11 @@ meta_wayland_keyboard_update (MetaWaylandKeyboard   *keyboard,
+   xkb_state_update_key (keyboard->xkb_info.state,
+                         hardware_keycode,
+                         is_press ? XKB_KEY_DOWN : XKB_KEY_UP);
++
++#ifdef HAVE_XWAYLAND
++  /* Observe before Shell handles overview, menus and global shortcuts. */
++  maybe_send_legacy_key (keyboard, (const ClutterEvent *) event);
++#endif
+ }
+ 
+ gboolean
+@@ -636,6 +844,10 @@ meta_wayland_keyboard_handle_event (MetaWaylandKeyboard   *keyboard,
+                                          (const ClutterEvent *) event))
+     notify_modifiers (keyboard);
+ 
++#ifdef HAVE_XWAYLAND
++  maybe_send_legacy_key (keyboard, (const ClutterEvent *) event);
++#endif
++
+   handled = meta_wayland_keyboard_broadcast_key (keyboard,
+                                                  (const ClutterEvent *) event);
+ 
+@@ -719,6 +931,13 @@ meta_wayland_keyboard_set_focus (MetaWaylandKeyboard *keyboard,
+ {
+   MetaWaylandInputDevice *input_device = META_WAYLAND_INPUT_DEVICE (keyboard);
+ 
++#ifdef HAVE_XWAYLAND
++  if (legacy_keyboard_is_inhibited (keyboard) ||
++      (surface && keyboard->legacy_client &&
++       wl_resource_get_client (surface->resource) == keyboard->legacy_client))
++    cancel_legacy_keys (keyboard);
++#endif
++
+   if (keyboard->focus_surface == surface)
+     return;
+ 
+@@ -863,6 +1082,17 @@ meta_wayland_keyboard_init (MetaWaylandKeyboard *keyboard)
+   wl_list_init (&keyboard->resource_list);
+   wl_list_init (&keyboard->focus_resource_list);
+ 
++#ifdef HAVE_XWAYLAND
++  keyboard->legacy_keys = g_hash_table_new (NULL, NULL);
++  keyboard->legacy_client_destroyed.notify = legacy_keyboard_client_destroyed;
++  keyboard->legacy_settings = g_settings_new ("org.gnome.mutter.wayland");
++  keyboard->legacy_mode = g_settings_get_enum (
++    keyboard->legacy_settings, "xwayland-legacy-keyboard-mode");
++  g_signal_connect (keyboard->legacy_settings,
++                    "changed::xwayland-legacy-keyboard-mode",
++                    G_CALLBACK (legacy_keyboard_setting_changed), keyboard);
++#endif
++
+   keyboard->focus_surface_listener.notify =
+     keyboard_handle_focus_surface_destroy;
+ }
+@@ -872,6 +1102,12 @@ meta_wayland_keyboard_finalize (GObject *object)
+ {
+   MetaWaylandKeyboard *keyboard = META_WAYLAND_KEYBOARD (object);
+ 
++#ifdef HAVE_XWAYLAND
++  legacy_keyboard_forget_client (keyboard);
++  g_clear_pointer (&keyboard->legacy_keys, g_hash_table_unref);
++  g_clear_object (&keyboard->legacy_settings);
++#endif
++
+   meta_wayland_xkb_info_destroy (&keyboard->xkb_info);
+ 
+   G_OBJECT_CLASS (meta_wayland_keyboard_parent_class)->finalize (object);
+diff --git a/src/wayland/meta-wayland-pointer.c b/src/wayland/meta-wayland-pointer.c
+index ec3447d..ba4dfcf 100644
+--- a/src/wayland/meta-wayland-pointer.c
++++ b/src/wayland/meta-wayland-pointer.c
+@@ -47,6 +47,7 @@
+ #include <string.h>
+ 
+ #include "backends/meta-backend-private.h"
++#include "backends/meta-remote-access-controller-private.h"
+ #include "backends/meta-cursor-renderer.h"
+ #include "backends/meta-cursor-tracker-private.h"
+ #include "backends/meta-cursor-xcursor.h"
+@@ -124,6 +125,13 @@ struct _MetaWaylandPointer
+   gulong implicit_grab_surface_destroyed_handler_id;
+ 
+   guint32 button_count;
++
++#ifdef HAVE_XWAYLAND
++  GSettings *legacy_button_settings;
++  gboolean legacy_buttons_enabled;
++  GHashTable *legacy_buttons;
++  MetaWaylandPointerClient *legacy_button_client;
++#endif
+ };
+ 
+ G_DEFINE_TYPE (MetaWaylandPointer, meta_wayland_pointer,
+@@ -293,6 +301,16 @@ meta_wayland_pointer_cleanup_pointer_client (MetaWaylandPointer       *pointer,
+                                              MetaWaylandPointerClient *pointer_client,
+                                              struct wl_client         *client)
+ {
++#ifdef HAVE_XWAYLAND
++  /* A dying/restarted Xwayland client must never leave a dangling target. */
++  if (pointer->legacy_button_client == pointer_client &&
++      wl_list_empty (&pointer_client->pointer_resources))
++    {
++      pointer->legacy_button_client = NULL;
++      g_hash_table_remove_all (pointer->legacy_buttons);
++    }
++#endif
++
+   if (meta_wayland_pointer_client_is_empty (pointer_client))
+     {
+       if (pointer->focus_client == pointer_client)
+@@ -457,6 +475,122 @@ meta_wayland_pointer_send_motion (MetaWaylandPointer *pointer,
+   meta_wayland_pointer_broadcast_frame (pointer);
+ }
+ 
++#ifdef HAVE_XWAYLAND
++/* Only extra buttons are exposed to the shared X server when opted in.
++ * This deliberately does not create a pointer enter or change focus. */
++static void
++send_legacy_button (MetaWaylandPointer       *pointer,
++                    MetaWaylandPointerClient *client,
++                    uint32_t                  button,
++                    uint32_t                  time,
++                    uint32_t                  state)
++{
++  struct wl_resource *resource;
++  uint32_t serial = meta_wayland_input_device_next_serial (
++    META_WAYLAND_INPUT_DEVICE (pointer));
++
++  wl_resource_for_each (resource, &client->pointer_resources)
++    {
++      wl_pointer_send_button (resource, serial, time,
++                              button, state);
++      meta_wayland_pointer_send_frame (pointer, resource);
++    }
++}
++
++static void
++cancel_legacy_button (MetaWaylandPointer *pointer)
++{
++  GHashTableIter iter;
++  gpointer button;
++
++  if (!pointer->legacy_button_client)
++    return;
++
++  g_hash_table_iter_init (&iter, pointer->legacy_buttons);
++  while (g_hash_table_iter_next (&iter, &button, NULL))
++    send_legacy_button (pointer, pointer->legacy_button_client,
++                        GPOINTER_TO_UINT (button),
++                        (uint32_t) (g_get_monotonic_time () / 1000),
++                        WL_POINTER_BUTTON_STATE_RELEASED);
++  g_hash_table_remove_all (pointer->legacy_buttons);
++  pointer->legacy_button_client = NULL;
++}
++
++static gboolean
++legacy_pointer_is_inhibited (MetaWaylandPointer *pointer)
++{
++  MetaRemoteAccessController *controller =
++    meta_backend_get_remote_access_controller (backend_from_pointer (pointer));
++
++  return !controller || meta_remote_access_controller_is_inhibited (controller);
++}
++
++static void
++legacy_pointer_inhibition_changed (MetaRemoteAccessController *controller,
++                                   gboolean                    inhibited,
++                                   MetaWaylandPointer         *pointer)
++{
++  if (inhibited)
++    cancel_legacy_button (pointer);
++}
++
++static void
++legacy_button_setting_changed (GSettings          *settings,
++                               const char         *key,
++                               MetaWaylandPointer *pointer)
++{
++  cancel_legacy_button (pointer);
++  pointer->legacy_buttons_enabled = g_settings_get_boolean (
++    settings, "xwayland-legacy-pointer-buttons");
++}
++
++static void
++maybe_send_legacy_button (MetaWaylandPointer *pointer,
++                          const ClutterEvent *event)
++{
++  MetaWaylandSeat *seat = meta_wayland_pointer_get_seat (pointer);
++  MetaWaylandCompositor *compositor = meta_wayland_seat_get_compositor (seat);
++  MetaWaylandPointerClient *client;
++  uint32_t button = clutter_event_get_event_code (event);
++
++  if (!pointer->legacy_buttons_enabled || button < BTN_SIDE || button > BTN_TASK)
++    return;
++
++  if (clutter_event_type (event) == CLUTTER_BUTTON_RELEASE)
++    {
++      if (pointer->legacy_button_client &&
++          g_hash_table_remove (pointer->legacy_buttons, GUINT_TO_POINTER (button)))
++        {
++          if (pointer->focus_client != pointer->legacy_button_client)
++            send_legacy_button (pointer, pointer->legacy_button_client, button,
++                                clutter_event_get_time (event),
++                                WL_POINTER_BUTTON_STATE_RELEASED);
++          if (g_hash_table_size (pointer->legacy_buttons) == 0)
++            pointer->legacy_button_client = NULL;
++        }
++      return;
++    }
++
++  /* Overview, app grid and menus are allowed. GNOME Shell inhibits remote
++   * access synchronously when entering its locked/greeter session mode. */
++  if (legacy_pointer_is_inhibited (pointer) || !compositor->xwayland_manager.client)
++    return;
++
++  client = meta_wayland_pointer_get_pointer_client (
++    pointer, compositor->xwayland_manager.client);
++  if (!client ||
++      wl_list_empty (&client->pointer_resources) ||
++      g_hash_table_contains (pointer->legacy_buttons, GUINT_TO_POINTER (button)))
++    return;
++
++  if (client != pointer->focus_client)
++    send_legacy_button (pointer, client, button, clutter_event_get_time (event),
++                        WL_POINTER_BUTTON_STATE_PRESSED);
++  pointer->legacy_button_client = client;
++  g_hash_table_add (pointer->legacy_buttons, GUINT_TO_POINTER (button));
++}
++#endif
++
+ static void
+ meta_wayland_pointer_send_button (MetaWaylandPointer *pointer,
+                                   const ClutterEvent *event)
+@@ -466,6 +600,10 @@ meta_wayland_pointer_send_button (MetaWaylandPointer *pointer,
+ 
+   event_type = clutter_event_type (event);
+ 
++#ifdef HAVE_XWAYLAND
++  maybe_send_legacy_button (pointer, event);
++#endif
++
+   if (pointer->focus_client &&
+       !wl_list_empty (&pointer->focus_client->pointer_resources))
+     {
+@@ -512,6 +650,13 @@ meta_wayland_pointer_enable (MetaWaylandPointer *pointer)
+   pointer->cursor_surface = NULL;
+   pointer->cursor_shape = CLUTTER_CURSOR_INHERIT;
+ 
++#ifdef HAVE_XWAYLAND
++  if (meta_backend_get_remote_access_controller (backend))
++    g_signal_connect (meta_backend_get_remote_access_controller (backend),
++                      "inhibition-changed",
++                      G_CALLBACK (legacy_pointer_inhibition_changed), pointer);
++#endif
++
+   g_signal_connect (cursor_tracker,
+                     "cursor-changed",
+                     G_CALLBACK (meta_wayland_pointer_on_cursor_changed),
+@@ -527,6 +672,14 @@ meta_wayland_pointer_disable (MetaWaylandPointer *pointer)
+   MetaBackend *backend = backend_from_pointer (pointer);
+   MetaCursorTracker *cursor_tracker = meta_backend_get_cursor_tracker (backend);
+ 
++#ifdef HAVE_XWAYLAND
++  if (meta_backend_get_remote_access_controller (backend))
++    g_signal_handlers_disconnect_by_func (
++      meta_backend_get_remote_access_controller (backend),
++      legacy_pointer_inhibition_changed, pointer);
++  cancel_legacy_button (pointer);
++#endif
++
+   g_hash_table_foreach (pointer->pointer_clients,
+                         make_resources_inert_foreach,
+                         NULL);
+@@ -696,6 +849,15 @@ meta_wayland_pointer_update (MetaWaylandPointer *pointer,
+   event_type = clutter_event_type (event);
+   pointer->sprite = clutter_backend_get_sprite (clutter_backend, stage, event);
+ 
++#ifdef HAVE_XWAYLAND
++  /* Observe before Shell grabs/menus consume the event. Normal focused-X11
++   * releases stay in the normal dispatch path to avoid duplicate delivery. */
++  if (event_type == CLUTTER_BUTTON_PRESS ||
++      (event_type == CLUTTER_BUTTON_RELEASE &&
++       pointer->focus_client != pointer->legacy_button_client))
++    maybe_send_legacy_button (pointer, event);
++#endif
++
+   if ((event_type == CLUTTER_MOTION ||
+        event_type == CLUTTER_ENTER ||
+        event_type == CLUTTER_LEAVE) &&
+@@ -1108,6 +1270,17 @@ meta_wayland_pointer_set_focus (MetaWaylandPointer *pointer,
+   if (pointer->focus_surface == surface)
+     return;
+ 
++#ifdef HAVE_XWAYLAND
++  /* Preserve holds across desktop and Shell UI. Cancel on lock inhibition
++   * or before entering Xwayland, where normal delivery takes over. */
++  if (legacy_pointer_is_inhibited (pointer) ||
++      (surface && pointer->legacy_button_client &&
++       meta_wayland_pointer_get_pointer_client (
++         pointer, wl_resource_get_client (surface->resource)) ==
++       pointer->legacy_button_client))
++    cancel_legacy_button (pointer);
++#endif
++
+   pointer->last_rel_x = -FLT_MAX;
+   pointer->last_rel_y = -FLT_MAX;
+ 
+@@ -1607,6 +1780,17 @@ meta_wayland_pointer_get_seat (MetaWaylandPointer *pointer)
+ static void
+ meta_wayland_pointer_init (MetaWaylandPointer *pointer)
+ {
++#ifdef HAVE_XWAYLAND
++  pointer->legacy_button_settings =
++    g_settings_new ("org.gnome.mutter.wayland");
++  pointer->legacy_buttons = g_hash_table_new (NULL, NULL);
++  pointer->legacy_buttons_enabled = g_settings_get_boolean (
++    pointer->legacy_button_settings, "xwayland-legacy-pointer-buttons");
++  g_signal_connect (pointer->legacy_button_settings,
++                    "changed::xwayland-legacy-pointer-buttons",
++                    G_CALLBACK (legacy_button_setting_changed), pointer);
++#endif
++
+   pointer->pointer_clients =
+     g_hash_table_new_full (NULL, NULL, NULL,
+                            (GDestroyNotify) meta_wayland_pointer_client_free);
+@@ -1617,6 +1801,12 @@ meta_wayland_pointer_finalize (GObject *object)
+ {
+   MetaWaylandPointer *pointer = META_WAYLAND_POINTER (object);
+ 
++#ifdef HAVE_XWAYLAND
++  g_clear_object (&pointer->legacy_button_settings);
++  g_clear_pointer (&pointer->legacy_buttons, g_hash_table_unref);
++  pointer->legacy_button_client = NULL;
++#endif
++
+   g_clear_pointer (&pointer->pointer_clients, g_hash_table_unref);
+ 
+   G_OBJECT_CLASS (meta_wayland_pointer_parent_class)->finalize (object);

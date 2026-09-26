@@ -1,0 +1,4 @@
+/build/
+*.rpm
+*.tar.xz
+__pycache__/
