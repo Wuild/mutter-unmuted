@@ -17,7 +17,7 @@ def prepare(text, version, release):
     text, count = re.subn(r'^Version:\s*.*$', f'Version: {version}', text, count=1, flags=re.M)
     if count != 1:
         raise ValueError('Missing Version tag.')
-    text, count = re.subn(r'^Release:\s*.*$', f'Release: {release}.unmuted1', text, count=1, flags=re.M)
+    text, count = re.subn(r'^Release:\s*.*$', f'Release: {release}.unmuted2', text, count=1, flags=re.M)
     if count != 1:
         raise ValueError('Missing Release tag.')
     # Explicitly numbered high patch avoids collisions with distro auto numbering.

@@ -53,8 +53,8 @@ elif name == 'sha256sum':
 elif name == 'rpmbuild':
     if scenario == 'build': sys.exit(1)
     top = next(a[len('_topdir '):] for a in args if a.startswith('_topdir '))
-    for p in [f'x86_64/mutter-{version}-1.fc44.unmuted1.x86_64.rpm',
-              f'noarch/mutter-common-{version}-1.fc44.unmuted1.noarch.rpm']:
+    for p in [f'x86_64/mutter-{version}-1.fc44.unmuted2.x86_64.rpm',
+              f'noarch/mutter-common-{version}-1.fc44.unmuted2.noarch.rpm']:
         dest = pathlib.Path(top) / 'RPMS' / p
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.touch()
@@ -75,14 +75,14 @@ elif name == 'rpmbuild':
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("'_smp_build_ncpus 2'", log)
         self.assertIn("'builddep', '-y'", log)
-        self.assertIn('mutter-common-50.4-1.fc44.unmuted1.noarch.rpm', log)
+        self.assertIn('mutter-common-50.4-1.fc44.unmuted2.noarch.rpm', log)
         self.assertLess(log.index('\nrpmbuild '), log.rindex('\nsudo '))
 
     def test_detects_other_installed_version(self):
         result, log = self.run_installer('--build-only', version='51.2')
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn('mutter-51.2-1.fc44.x86_64', log)
-        self.assertIn('mutter-common-51.2-1.fc44.unmuted1.noarch.rpm', result.stdout)
+        self.assertIn('mutter-common-51.2-1.fc44.unmuted2.noarch.rpm', result.stdout)
         self.assertNotIn('sudo [\'dnf\', \'install\', \'/', log)
 
     def test_failures_never_install_runtime(self):

@@ -50,3 +50,21 @@ Installer/spec unit tests: 7 passed
 The installer tests simulate another installed version (51.2) to check version
 selection and packaging control flow. That is not a real Mutter 51.2 build or
 a claim that the forwarding patch works on that version.
+
+## Xwayland entry hold fix (.unmuted2)
+
+Entering an Xwayland/Wine window used to cancel the tracked extra-button hold.
+Removing that cancellation alone was insufficient: Xwayland itself emits button
+releases on `wl_pointer.enter`. The patch now retains the hold and resends its
+press after entry. This restores PTT automatically but does not eliminate the
+brief X11 release/press transition.
+
+The regression explicitly retargets pointer focus from desktop to a real
+Xwayland surface while the button is held (the minimal headless stage otherwise
+retains its desktop implicit grab). It checks the reset/restoration pair, then
+exactly one physical release, both inside Xwayland and after returning to the
+desktop. Existing lock-inhibition tests continue to pass.
+
+Development build: upstream Xwayland suite passed (2.74s), legacy-input suite
+passed (13.61s); seven installer/spec tests passed. Wine/Discord behavior after
+installing this revision still needs a live check.

@@ -152,10 +152,10 @@ index 1bcad75..58e02bc 100644
  
 diff --git a/src/tests/xwayland-legacy-input-tests.c b/src/tests/xwayland-legacy-input-tests.c
 new file mode 100644
-index 0000000..820b7a9
+index 0000000..01e286f
 --- /dev/null
 +++ b/src/tests/xwayland-legacy-input-tests.c
-@@ -0,0 +1,504 @@
+@@ -0,0 +1,549 @@
 +/*
 + * Copyright (C) 2022 Red Hat Inc.
 + *
@@ -616,6 +616,51 @@ index 0000000..820b7a9
 +  g_test_message ("Checking focused Xwayland keyboard pair");
 +  assert_raw_events (xdisplay, opcode, KEY_A + 8, XI_RawKeyPress, XI_RawKeyRelease, 1, 1);
 +
++  g_test_message ("Testing desktop-to-Xwayland held-button transitions");
++  /* Entering an X11/Wine window must restore PTT after Xwayland resets it. Check
++   * release inside X11 and a round trip back to the desktop while held. */
++  for (int round_trip = 0; round_trip < 2; round_trip++)
++    {
++      clutter_virtual_input_device_notify_absolute_motion (
++        device, CLUTTER_CURRENT_TIME, 799, 599);
++      meta_flush_input (test_context);
++      assert_raw_buttons (xdisplay, opcode, 0, 0);
++      g_assert_null (meta_wayland_pointer_get_focus_surface (compositor->seat->pointer));
++      clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                                  9, CLUTTER_BUTTON_STATE_PRESSED);
++      meta_flush_input (test_context);
++      assert_raw_buttons (xdisplay, opcode, 1, 0);
++      clutter_virtual_input_device_notify_absolute_motion (
++        device, CLUTTER_CURRENT_TIME, rect.x + rect.width / 2, rect.y + rect.height / 2);
++      meta_flush_input (test_context);
++      /* Exercise focus retargeting explicitly: the minimal headless stage
++       * otherwise retains its desktop implicit grab until button release. */
++      meta_wayland_pointer_focus_surface (compositor->seat->pointer,
++                                           meta_window_get_wayland_surface (window));
++      meta_flush_input (test_context);
++      g_assert_nonnull (meta_wayland_pointer_get_focus_surface (compositor->seat->pointer));
++      g_assert_true (meta_wayland_surface_get_window (
++        meta_wayland_pointer_get_focus_surface (compositor->seat->pointer)) == window);
++      /* Xwayland generates a release on enter; Mutter restores the hold. */
++      assert_raw_buttons (xdisplay, opcode, 1, 1);
++      if (round_trip)
++        {
++          clutter_virtual_input_device_notify_absolute_motion (
++            device, CLUTTER_CURRENT_TIME, 799, 599);
++          meta_flush_input (test_context);
++          meta_wayland_pointer_focus_surface (compositor->seat->pointer, NULL);
++          assert_raw_buttons (xdisplay, opcode, 0, 0);
++        }
++      clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                                  9, CLUTTER_BUTTON_STATE_RELEASED);
++      meta_flush_input (test_context);
++      assert_raw_buttons (xdisplay, opcode, 0, 1);
++    }
++  clutter_virtual_input_device_notify_absolute_motion (
++    device, CLUTTER_CURRENT_TIME, rect.x + rect.width / 2, rect.y + rect.height / 2);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 0, 0);
++
 +  g_test_message ("Testing Xwayland-to-native held-button transition");
 +  /* Hold an X11-delivered button while moving back to a native window. */
 +  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
@@ -971,7 +1016,7 @@ index 8d7849c..59d7d2d 100644
  
    G_OBJECT_CLASS (meta_wayland_keyboard_parent_class)->finalize (object);
 diff --git a/src/wayland/meta-wayland-pointer.c b/src/wayland/meta-wayland-pointer.c
-index ec3447d..ba4dfcf 100644
+index ec3447d..437e6ec 100644
 --- a/src/wayland/meta-wayland-pointer.c
 +++ b/src/wayland/meta-wayland-pointer.c
 @@ -47,6 +47,7 @@
@@ -1192,25 +1237,48 @@ index ec3447d..ba4dfcf 100644
    if ((event_type == CLUTTER_MOTION ||
         event_type == CLUTTER_ENTER ||
         event_type == CLUTTER_LEAVE) &&
-@@ -1108,6 +1270,17 @@ meta_wayland_pointer_set_focus (MetaWaylandPointer *pointer,
+@@ -1056,6 +1218,25 @@ meta_wayland_pointer_broadcast_enter (MetaWaylandPointer *pointer,
+                                      serial, surface);
+ 
+   meta_wayland_pointer_broadcast_frame (pointer);
++
++#ifdef HAVE_XWAYLAND
++  /* Xwayland releases all buttons on wl_pointer.enter. Restore the extra
++   * buttons that are still physically held after that reset, without
++   * discarding their tracking or waiting for another physical press. */
++  if (pointer->focus_client == pointer->legacy_button_client &&
++      !legacy_pointer_is_inhibited (pointer))
++    {
++      GHashTableIter iter;
++      gpointer button;
++
++      g_hash_table_iter_init (&iter, pointer->legacy_buttons);
++      while (g_hash_table_iter_next (&iter, &button, NULL))
++        send_legacy_button (pointer, pointer->legacy_button_client,
++                            GPOINTER_TO_UINT (button),
++                            (uint32_t) (g_get_monotonic_time () / 1000),
++                            WL_POINTER_BUTTON_STATE_PRESSED);
++    }
++#endif
+ }
+ 
+ static void
+@@ -1108,6 +1289,14 @@ meta_wayland_pointer_set_focus (MetaWaylandPointer *pointer,
    if (pointer->focus_surface == surface)
      return;
  
 +#ifdef HAVE_XWAYLAND
-+  /* Preserve holds across desktop and Shell UI. Cancel on lock inhibition
-+   * or before entering Xwayland, where normal delivery takes over. */
-+  if (legacy_pointer_is_inhibited (pointer) ||
-+      (surface && pointer->legacy_button_client &&
-+       meta_wayland_pointer_get_pointer_client (
-+         pointer, wl_resource_get_client (surface->resource)) ==
-+       pointer->legacy_button_client))
++  /* Xwayland already knows about forwarded presses. Keep tracking them
++   * across focus entry so normal delivery can supply the physical release,
++   * or forwarding can supply it if the pointer leaves Xwayland again. */
++  if (legacy_pointer_is_inhibited (pointer))
 +    cancel_legacy_button (pointer);
 +#endif
 +
    pointer->last_rel_x = -FLT_MAX;
    pointer->last_rel_y = -FLT_MAX;
  
-@@ -1607,6 +1780,17 @@ meta_wayland_pointer_get_seat (MetaWaylandPointer *pointer)
+@@ -1607,6 +1796,17 @@ meta_wayland_pointer_get_seat (MetaWaylandPointer *pointer)
  static void
  meta_wayland_pointer_init (MetaWaylandPointer *pointer)
  {
@@ -1228,7 +1296,7 @@ index ec3447d..ba4dfcf 100644
    pointer->pointer_clients =
      g_hash_table_new_full (NULL, NULL, NULL,
                             (GDestroyNotify) meta_wayland_pointer_client_free);
-@@ -1617,6 +1801,12 @@ meta_wayland_pointer_finalize (GObject *object)
+@@ -1617,6 +1817,12 @@ meta_wayland_pointer_finalize (GObject *object)
  {
    MetaWaylandPointer *pointer = META_WAYLAND_POINTER (object);
  
@@ -1241,3 +1309,15 @@ index ec3447d..ba4dfcf 100644
    g_clear_pointer (&pointer->pointer_clients, g_hash_table_unref);
  
    G_OBJECT_CLASS (meta_wayland_pointer_parent_class)->finalize (object);
+diff --git a/src/wayland/meta-wayland-pointer.h b/src/wayland/meta-wayland-pointer.h
+index 4cf9b6c..c0d9749 100644
+--- a/src/wayland/meta-wayland-pointer.h
++++ b/src/wayland/meta-wayland-pointer.h
+@@ -99,6 +99,7 @@ MetaWaylandSurface * meta_wayland_pointer_get_current_surface (MetaWaylandPointe
+ META_EXPORT_TEST
+ MetaWaylandSurface * meta_wayland_pointer_get_focus_surface (MetaWaylandPointer *pointer);
+ 
++META_EXPORT_TEST
+ void meta_wayland_pointer_focus_surface (MetaWaylandPointer *pointer,
+                                          MetaWaylandSurface *surface);
+ 

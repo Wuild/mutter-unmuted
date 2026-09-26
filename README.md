@@ -14,6 +14,11 @@ This is an experimental community patch, tested with **Mutter 50.4 / GNOME Shell
 builds from matching source; it is not pinned to 50.4. It is inspired by KDE's legacy X11 input support and is
 not an official GNOME, KDE or Discord project.
 
+The current revision restores held mouse PTT when crossing into an Xwayland
+window (including Wine). Xwayland resets buttons on entry, so the patch resends
+still-held extra buttons immediately afterward. A brief release/press transition
+can occur, but PTT no longer stays off until you press again.
+
 ## Why this exists
 
 Discord running through Xwayland can listen for input inside the shared X11
@@ -68,7 +73,7 @@ automatically. Run the script without sudo. It leaves forwarding disabled by
 default and preserves existing settings.
 
 See [the build guide](docs/BUILDING.md) for manual steps or other distributions.
-Built packages keep your Mutter version and add `.unmuted1` to the distribution
+Built packages keep your Mutter version and add `.unmuted2` to the distribution
 release. Re-running the installer rebuilds and reinstalls that local release.
 
 This repository contains source and packaging, not prebuilt RPMs. Automatic RPM packaging is implemented for Fedora/Nobara; other distributions

@@ -118,7 +118,7 @@ $build_only && exit 0
 }
 # A repeated install of the same local release should refresh its files too.
 operation=install
-[[ $release == "${base_release}.unmuted1" ]] && operation=reinstall
+[[ $release == "${base_release}.unmuted2" ]] && operation=reinstall
 sudo dnf "$operation" "${dnf_flags[@]}" "${packages[@]}"
 cat <<'NEXT'
 Installed. Save your work, then log out and back in.

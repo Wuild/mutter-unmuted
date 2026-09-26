@@ -12,7 +12,7 @@ The script detects the installed Mutter **version, release and architecture**.
 It downloads the exact matching distribution source RPM with DNF and unpacks it
 into a fresh directory under `build/`. It preserves the distribution's build
 options, API version, dependencies, source files, patches and package layout.
-The spec adapter adds our patch, sets the same version with a local `.unmuted1`
+The spec adapter adds our patch, sets the same version with a local `.unmuted2`
 release suffix, and adds the Xwayland integration tests if they are not present.
 The existing distribution tests are preserved too.
 

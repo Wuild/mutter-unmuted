@@ -15,7 +15,7 @@ class SpecTests(unittest.TestCase):
     def test_preserves_packaging_and_changes_version(self):
         result = module.prepare(self.text, '51.2', '4.fc45')
         self.assertIn('Version: 51.2', result)
-        self.assertIn('Release: 4.fc45.unmuted1', result)
+        self.assertIn('Release: 4.fc45.unmuted2', result)
         self.assertIn('%meson -Degl_device=true', result)
         self.assertIn('mutter_increase_check_alive_timeout.patch', result)
         self.assertNotIn('mutter-50.4-legacy-input.patch', result)
