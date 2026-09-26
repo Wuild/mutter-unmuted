@@ -15,7 +15,7 @@ class SpecTests(unittest.TestCase):
     def test_preserves_packaging_and_changes_version(self):
         result = module.prepare(self.text, '51.2', '4.fc45')
         self.assertIn('Version: 51.2', result)
-        self.assertIn('Release: 4.fc45.unmuted2', result)
+        self.assertIn('Release: 4.fc45.unmuted3', result)
         self.assertIn('%meson -Degl_device=true', result)
         self.assertIn('mutter_increase_check_alive_timeout.patch', result)
         self.assertNotIn('mutter-50.4-legacy-input.patch', result)
@@ -27,6 +27,29 @@ class SpecTests(unittest.TestCase):
         second = module.prepare(first, '50.4', '1.fc44')
         self.assertEqual(second.count('mutter-unmuted.patch'), 1)
         self.assertEqual(second.count('xwayland-legacy-input --print-errorlogs'), 1)
+
+    def test_xwayland_spec_keeps_its_checks(self):
+        text = """Name: xorg-x11-server-Xwayland
+Version: 24.1.13
+Release: 2%{?dist}
+Patch1: distro.patch
+%description
+Xwayland
+%prep
+%autosetup -S git_am
+%build
+%meson_build
+%install
+%meson_install
+%check
+desktop-file-validate example.desktop
+"""
+        result = module.prepare(text, '24.1.14', '3.fc45', 'xwayland')
+        self.assertIn('Version: 24.1.14', result)
+        self.assertIn('xwayland-unmuted.patch', result)
+        self.assertIn('desktop-file-validate example.desktop', result)
+        self.assertNotIn('xwayland-legacy-input --print-errorlogs', result)
+        self.assertIn('%autosetup -S git_am', result)
 
     def test_rejects_unsupported_prep(self):
         for prep in ('%setup -q', '%autosetup -N'):

@@ -3,21 +3,23 @@
 set -euo pipefail
 usage() {
   cat <<'HELP'
-Usage: ./install.sh [--build-only] [--yes] [--jobs N] [--source-rpm FILE]
+Usage: ./install.sh [--build-only] [--yes] [--jobs N] [--source-rpm FILE] [--xwayland-source-rpm FILE]
 
-Detect the installed Mutter version, obtain matching distribution source,
+Detect installed Mutter and Xwayland versions, obtain matching distribution source,
 install build dependencies, apply the patch, build/test RPMs and install them.
 Supports Fedora/Nobara RPM packaging; other distributions need a packaging port.
 Run without sudo. sudo is used only for dependency/package installation.
   --build-only       Build without installing the runtime packages.
   --yes              Accept DNF transactions automatically.
   --jobs N           Parallel build jobs (default: at most 8).
-  --source-rpm FILE  Use matching local source when unavailable in repositories.
+  --source-rpm FILE  Use matching local Mutter source.
+  --xwayland-source-rpm FILE  Use matching local Xwayland source.
 HELP
 }
 build_only=false
 assume_yes=false
 source_rpm=''
+xwayland_source_rpm=''
 jobs=$(nproc)
 (( jobs <= 8 )) || jobs=8
 while (( $# )); do
@@ -27,6 +29,9 @@ while (( $# )); do
     --source-rpm)
       [[ -n ${2:-} && -f $2 ]] || { echo '--source-rpm requires an existing file' >&2; exit 2; }
       source_rpm=$(realpath -- "$2"); shift 2 ;;
+    --xwayland-source-rpm)
+      [[ -n ${2:-} && -f $2 ]] || { echo '--xwayland-source-rpm requires an existing file' >&2; exit 2; }
+      xwayland_source_rpm=$(realpath -- "$2"); shift 2 ;;
     --jobs)
       [[ ${2:-} =~ ^[1-9][0-9]*$ ]] || { echo '--jobs requires a positive integer' >&2; exit 2; }
       jobs=$2; shift 2 ;;
@@ -46,6 +51,10 @@ arch=$(rpm -q --qf '%{ARCH}' mutter)
 [[ $version =~ ^[0-9][A-Za-z0-9.~_+-]*$ && $release =~ ^[A-Za-z0-9._+~%-]+$ && $arch =~ ^[A-Za-z0-9_]+$ ]] || {
   echo 'Cannot determine a supported installed Mutter package version.' >&2; exit 1;
 }
+xwayland_version=$(rpm -q --qf '%{VERSION}' xorg-x11-server-Xwayland)
+xwayland_release=$(rpm -q --qf '%{RELEASE}' xorg-x11-server-Xwayland)
+xwayland_arch=$(rpm -q --qf '%{ARCH}' xorg-x11-server-Xwayland)
+xwayland_base=$(printf '%s' "$xwayland_release" | sed -E 's/\.unmuted[0-9]+$//')
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # Strip this project's local release suffix when locating distribution sources.
 base_release=$(printf '%s' "$release" | sed -E 's/\.unmuted[0-9]+$//; s/\.legacy[0-9]+//')
@@ -92,6 +101,10 @@ else
   echo '  ./install.sh --source-rpm /path/to/matching-mutter.src.rpm' >&2
   exit 1
 fi
+echo "Detected Xwayland $xwayland_version-$xwayland_release ($xwayland_arch)."
+bash "$root/tools/build-xwayland.sh" "$root" "$build_root/xwayland"   "$xwayland_version" "$xwayland_base" "$xwayland_arch" "$jobs" "$assume_yes" "$xwayland_source_rpm"
+# Only the test context reads this variable; installed Mutter keeps its normal path.
+export MUTTER_TEST_XWAYLAND_PATH="$build_root/xwayland/extracted/usr/bin/Xwayland"
 python3 "$root/tools/prepare-spec.py" "$build_root/SPECS/mutter.spec" "$version" "$base_release"
 cp "$root/patches/mutter-50.4-legacy-input.patch" "$build_root/SOURCES/mutter-unmuted.patch"
 sudo dnf builddep "${dnf_flags[@]}" "$build_root/SPECS/mutter.spec"
@@ -111,14 +124,29 @@ done < <(find "$build_root/RPMS" -type f -name '*.rpm' -print0)
 for package in "${packages[@]}"; do
   [[ $(rpm -qp --qf '%{VERSION}' "$package") == "$version" ]] || { echo 'Built version mismatch.' >&2; exit 1; }
 done
-printf 'Build and tests passed. Packages:\n%s\n%s\n' "${packages[@]}"
+packages+=("$(cat "$build_root/xwayland/runtime-rpm.txt")")
+# Build dependencies (notably Xwayland-devel) may require the exact runtime
+# release. Upgrade already-installed companion packages from these same builds.
+while IFS= read -r -d '' package; do
+  name=$(rpm -qp --qf '%{NAME}' "$package")
+  case $name in mutter|mutter-common|xorg-x11-server-Xwayland) continue;; esac
+  if rpm -q --quiet "$name"; then
+    packages+=("$package")
+  fi
+done < <(find "$build_root/RPMS" "$build_root/xwayland/RPMS" -type f -name '*.rpm' -print0)
+
+printf 'Build and paired tests passed. Packages:\n'
+printf '%s\n' "${packages[@]}"
 $build_only && exit 0
 [[ $(rpm -q --qf '%{VERSION}-%{RELEASE}' mutter) == "$version-$release" ]] || {
   echo 'Installed Mutter changed during the build. Run this script again.' >&2; exit 1;
 }
 # A repeated install of the same local release should refresh its files too.
+[[ $(rpm -q --qf '%{VERSION}-%{RELEASE}' xorg-x11-server-Xwayland) == "$xwayland_version-$xwayland_release" ]] || {
+  echo 'Installed Xwayland changed during the build. Run this script again.' >&2; exit 1;
+}
 operation=install
-[[ $release == "${base_release}.unmuted2" ]] && operation=reinstall
+[[ $release == "${base_release}.unmuted3" && $xwayland_release == "${xwayland_base}.unmuted3" ]] && operation=reinstall
 sudo dnf "$operation" "${dnf_flags[@]}" "${packages[@]}"
 cat <<'NEXT'
 Installed. Save your work, then log out and back in.

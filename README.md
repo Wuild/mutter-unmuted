@@ -2,7 +2,7 @@
 
 **Push to talk, across your GNOME desktop.**
 
-An opt-in Mutter patch that lets legacy X11 applications receive selected keyboard
+An opt-in pair of Mutter and Xwayland patches that lets legacy X11 applications receive selected keyboard
 and extra mouse-button input while you use GNOME on Wayland. Built to make
 Discord's forward-thumb-button push to talk work across native Wayland apps,
 the empty desktop, overview, app grid and Shell menus.
@@ -10,14 +10,14 @@ the empty desktop, overview, app grid and Shell menus.
 **Forward while unlocked. Stop at the lock screen.**
 
 This is an experimental community patch, tested with **Mutter 50.4 / GNOME Shell
-50.4 on Nobara 44**. The installer detects your installed Mutter version and
-builds from matching source; it is not pinned to 50.4. It is inspired by KDE's legacy X11 input support and is
+50.4 and Xwayland 24.1.13 on Nobara 44**. The installer detects the installed version of each component and builds both
+from matching distribution sources; it is not pinned to those versions. It is inspired by KDE's legacy X11 input support and is
 not an official GNOME, KDE or Discord project.
 
-The current revision restores held mouse PTT when crossing into an Xwayland
-window (including Wine). Xwayland resets buttons on entry, so the patch resends
-still-held extra buttons immediately afterward. A brief release/press transition
-can occur, but PTT no longer stays off until you press again.
+The current revision preserves held mouse PTT when crossing into Xwayland/Wine
+windows **without an artificial release/press pair**. Both patched components
+are required. This replaces the earlier Mutter-only resend workaround that
+could trigger Discord's PTT sounds.
 
 ## Why this exists
 
@@ -54,15 +54,20 @@ cd mutter-unmuted
 Or download and extract the source ZIP from GitHub, open a terminal in its
 folder, and run `bash install.sh`. No Git installation is needed for that route.
 
-The installer reads your installed Mutter version, release and architecture,
-obtains its matching distribution source RPM, preserves that recipe and its
-patches, installs build dependencies, adds this patch, builds as your normal
-user, runs the tests, and installs only `mutter` and `mutter-common`. It asks for
+The installer reads the installed versions, releases and architectures of
+Mutter and Xwayland, obtains their matching source RPMs, preserves distribution
+recipes and patches, installs dependencies, and builds as your normal user.
+It builds Xwayland first, then tests Mutter against that freshly built Xwayland
+executable. Only after both builds and the paired tests pass does it install
+`mutter`, `mutter-common` and `xorg-x11-server-Xwayland` together, plus matching
+already-installed companion packages such as `Xwayland-devel` that require the
+exact runtime release. It asks for
 sudo when needed and shows DNF transaction prompts. Allow several minutes; the
 build directory and log path are printed at startup.
 
 If your repositories no longer provide the exact source, use
-`./install.sh --source-rpm /path/to/matching-mutter.src.rpm`. For the original
+`./install.sh --source-rpm /path/to/matching-mutter.src.rpm` and/or
+`--xwayland-source-rpm /path/to/matching-xwayland.src.rpm`. For the original
 Nobara 44 / 50.4-1.fc44 setup, an included recipe and checksum-verified upstream
 archive provide an automatic fallback. Other versions never silently fall back
 to 50.4. Patch, build or test failures stop before replacing the compositor.
@@ -73,13 +78,19 @@ automatically. Run the script without sudo. It leaves forwarding disabled by
 default and preserves existing settings.
 
 See [the build guide](docs/BUILDING.md) for manual steps or other distributions.
-Built packages keep your Mutter version and add `.unmuted2` to the distribution
-release. Re-running the installer rebuilds and reinstalls that local release.
+Built packages keep each installed upstream version and add `.unmuted3` to its
+distribution release. Re-running the installer rebuilds and reinstalls that local release.
 
 This repository contains source and packaging, not prebuilt RPMs. Automatic RPM packaging is implemented for Fedora/Nobara; other distributions
 need their own packaging integration. After installing, **log out and back in**
 to start the patched compositor; the running Wayland session does not change
 when a package is installed.
+
+After a distribution update to **either** component, rerun `./install.sh`.
+It detects the newly installed versions and rebuilds both. If the required
+sources are unavailable, a patch conflicts, or paired tests fail, it stops
+before installing either local build. No version pinning or background updater
+is added. Until both patches are present again, seamless handoff is not assured.
 
 ## Enable it
 
@@ -156,6 +167,14 @@ Xwayland client without synthesizing focus enters or using XTEST. Held inputs
 are tracked so releases are paired, including across desktop and Shell UI
 transitions. Settings changes cancel forwarded holds.
 
+The private `mutter_unmuted_v1` Wayland protocol coordinates pointer entry.
+Mutter sends a per-pointer bitmask of the five extra buttons still held,
+immediately before `wl_pointer.enter`. Patched Xwayland skips its usual
+synthetic release only for those buttons, then consumes the mask. With
+forwarding disabled the mask is zero and normal Xwayland reset behavior remains.
+Only Mutter's own Xwayland client can bind the protocol. Physical releases,
+settings changes and lock cancellation still deliver normal release events.
+
 Input is observed before ordinary Shell grabs and compositor shortcuts consume
 it. Those shortcuts continue to work normally.
 
@@ -186,9 +205,9 @@ running a full GNOME authentication screen. See [validation details](docs/VALIDA
 
 ## Repository contents
 
-- `patches/`: Mutter implementation, schema changes and integration tests.
+- `patches/`: Mutter implementation/tests and the coordinated Xwayland patch.
 - `packaging/nobara/`: RPM spec and the existing Nobara patches/schema override.
-- `install.sh`: version detection, source acquisition, dependencies, build and installation.
+- `install.sh`: version detection, source acquisition, dependencies and paired installation.
 - `tools/`: spec adaptation and an independent native Wayland test window.
 - `tests/`: isolated installer and packaging checks.
 - `docs/`: build instructions and validation notes.
@@ -199,7 +218,9 @@ Specify whether it happens in an app, the desktop, overview, app grid or a menu.
 
 ## License and credits
 
-GPL-2.0-or-later; see [LICENSE](LICENSE). Existing upstream notices are retained.
+The Mutter patch and installer are GPL-2.0-or-later; see [LICENSE](LICENSE).
+The Xwayland changes and shared protocol are MIT-licensed; see
+[LICENSES/MIT.txt](LICENSES/MIT.txt). Existing upstream notices are retained.
 Mutter and GNOME Shell are GNOME projects. The RPM recipe and distribution
 patches derive from Fedora/Nobara packaging. KDE's legacy X11 support inspired
 the feature; this implementation is not a direct KWin port.

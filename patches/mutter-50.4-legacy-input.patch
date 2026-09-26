@@ -133,6 +133,18 @@ index 82a25c8..eb3c417 100644
    controller_signals[CONTROLLER_NEW_HANDLE] =
      g_signal_new ("new-handle",
                    G_TYPE_FROM_CLASS (klass),
+diff --git a/src/meson.build b/src/meson.build
+index 9410646..aff87bc 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -1054,6 +1054,7 @@ wayland_protocol_sources = []
+ #    * 'eglstreams' are from wayland-eglstream-protocols
+ #  - protocol version (optional for 'stable', 'staging' and 'unstable')
+ wayland_protocols = [
++  ['mutter-unmuted-v1', 'private', ],
+   ['color-management', 'staging', 1, ],
+   ['color-representation', 'staging', 1, ],
+   ['commit-timing', 'staging', 1, ],
 diff --git a/src/tests/meson.build b/src/tests/meson.build
 index 1bcad75..58e02bc 100644
 --- a/src/tests/meson.build
@@ -150,12 +162,24 @@ index 1bcad75..58e02bc 100644
    ]
  endif
  
+diff --git a/src/tests/meta-context-test.c b/src/tests/meta-context-test.c
+index 0089517..df4abe5 100644
+--- a/src/tests/meta-context-test.c
++++ b/src/tests/meta-context-test.c
+@@ -131,6 +131,7 @@ meta_context_test_configure (MetaContext   *context,
+   meta_wayland_override_display_name ("mutter-test-display");
+ #ifdef HAVE_XWAYLAND
+   meta_xwayland_override_display_number (512);
++  meta_xwayland_override_path (g_getenv ("MUTTER_TEST_XWAYLAND_PATH"));
+ #endif
+ 
+   meta_context_set_plugin_gtype (context, META_TYPE_TEST_SHELL);
 diff --git a/src/tests/xwayland-legacy-input-tests.c b/src/tests/xwayland-legacy-input-tests.c
 new file mode 100644
-index 0000000..01e286f
+index 0000000..44c3ba5
 --- /dev/null
 +++ b/src/tests/xwayland-legacy-input-tests.c
-@@ -0,0 +1,549 @@
+@@ -0,0 +1,567 @@
 +/*
 + * Copyright (C) 2022 Red Hat Inc.
 + *
@@ -617,7 +641,7 @@ index 0000000..01e286f
 +  assert_raw_events (xdisplay, opcode, KEY_A + 8, XI_RawKeyPress, XI_RawKeyRelease, 1, 1);
 +
 +  g_test_message ("Testing desktop-to-Xwayland held-button transitions");
-+  /* Entering an X11/Wine window must restore PTT after Xwayland resets it. Check
++  /* Entering an X11/Wine window must preserve PTT without any reset. Check
 +   * release inside X11 and a round trip back to the desktop while held. */
 +  for (int round_trip = 0; round_trip < 2; round_trip++)
 +    {
@@ -626,10 +650,11 @@ index 0000000..01e286f
 +      meta_flush_input (test_context);
 +      assert_raw_buttons (xdisplay, opcode, 0, 0);
 +      g_assert_null (meta_wayland_pointer_get_focus_surface (compositor->seat->pointer));
-+      clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
-+                                                  9, CLUTTER_BUTTON_STATE_PRESSED);
++      for (uint32_t button = 8; button <= 12; button++)
++        clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                                    button, CLUTTER_BUTTON_STATE_PRESSED);
 +      meta_flush_input (test_context);
-+      assert_raw_buttons (xdisplay, opcode, 1, 0);
++      assert_raw_buttons (xdisplay, opcode, 5, 0);
 +      clutter_virtual_input_device_notify_absolute_motion (
 +        device, CLUTTER_CURRENT_TIME, rect.x + rect.width / 2, rect.y + rect.height / 2);
 +      meta_flush_input (test_context);
@@ -641,8 +666,8 @@ index 0000000..01e286f
 +      g_assert_nonnull (meta_wayland_pointer_get_focus_surface (compositor->seat->pointer));
 +      g_assert_true (meta_wayland_surface_get_window (
 +        meta_wayland_pointer_get_focus_surface (compositor->seat->pointer)) == window);
-+      /* Xwayland generates a release on enter; Mutter restores the hold. */
-+      assert_raw_buttons (xdisplay, opcode, 1, 1);
++      /* Negotiated handoff must not emit any release/repress pair. */
++      assert_raw_buttons (xdisplay, opcode, 0, 0);
 +      if (round_trip)
 +        {
 +          clutter_virtual_input_device_notify_absolute_motion (
@@ -651,15 +676,32 @@ index 0000000..01e286f
 +          meta_wayland_pointer_focus_surface (compositor->seat->pointer, NULL);
 +          assert_raw_buttons (xdisplay, opcode, 0, 0);
 +        }
-+      clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
-+                                                  9, CLUTTER_BUTTON_STATE_RELEASED);
++      for (uint32_t button = 8; button <= 12; button++)
++        clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                                    button, CLUTTER_BUTTON_STATE_RELEASED);
 +      meta_flush_input (test_context);
-+      assert_raw_buttons (xdisplay, opcode, 0, 1);
++      assert_raw_buttons (xdisplay, opcode, 0, 5);
 +    }
 +  clutter_virtual_input_device_notify_absolute_motion (
 +    device, CLUTTER_CURRENT_TIME, rect.x + rect.width / 2, rect.y + rect.height / 2);
 +  meta_flush_input (test_context);
 +  assert_raw_buttons (xdisplay, opcode, 0, 0);
++
++  g_test_message ("Testing disabled forwarding retains Xwayland enter reset");
++  g_settings_set_boolean (settings, "xwayland-legacy-pointer-buttons", FALSE);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_PRESSED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 1, 0);
++  meta_wayland_pointer_focus_surface (compositor->seat->pointer, NULL);
++  meta_wayland_pointer_focus_surface (compositor->seat->pointer,
++                                       meta_window_get_wayland_surface (window));
++  assert_raw_buttons (xdisplay, opcode, 0, 1);
++  clutter_virtual_input_device_notify_button (device, CLUTTER_CURRENT_TIME,
++                                              9, CLUTTER_BUTTON_STATE_RELEASED);
++  meta_flush_input (test_context);
++  assert_raw_buttons (xdisplay, opcode, 0, 1);
++  g_settings_set_boolean (settings, "xwayland-legacy-pointer-buttons", TRUE);
 +
 +  g_test_message ("Testing Xwayland-to-native held-button transition");
 +  /* Hold an X11-delivered button while moving back to a native window. */
@@ -1016,23 +1058,27 @@ index 8d7849c..59d7d2d 100644
  
    G_OBJECT_CLASS (meta_wayland_keyboard_parent_class)->finalize (object);
 diff --git a/src/wayland/meta-wayland-pointer.c b/src/wayland/meta-wayland-pointer.c
-index ec3447d..437e6ec 100644
+index ec3447d..2031cdf 100644
 --- a/src/wayland/meta-wayland-pointer.c
 +++ b/src/wayland/meta-wayland-pointer.c
-@@ -47,6 +47,7 @@
+@@ -46,7 +46,10 @@
+ #include <linux/input.h>
  #include <string.h>
  
++#include "mutter-unmuted-v1-server-protocol.h"
++
  #include "backends/meta-backend-private.h"
 +#include "backends/meta-remote-access-controller-private.h"
  #include "backends/meta-cursor-renderer.h"
  #include "backends/meta-cursor-tracker-private.h"
  #include "backends/meta-cursor-xcursor.h"
-@@ -124,6 +125,13 @@ struct _MetaWaylandPointer
+@@ -124,6 +127,14 @@ struct _MetaWaylandPointer
    gulong implicit_grab_surface_destroyed_handler_id;
  
    guint32 button_count;
 +
 +#ifdef HAVE_XWAYLAND
++  struct wl_list legacy_handoffs;
 +  GSettings *legacy_button_settings;
 +  gboolean legacy_buttons_enabled;
 +  GHashTable *legacy_buttons;
@@ -1041,7 +1087,7 @@ index ec3447d..437e6ec 100644
  };
  
  G_DEFINE_TYPE (MetaWaylandPointer, meta_wayland_pointer,
-@@ -293,6 +301,16 @@ meta_wayland_pointer_cleanup_pointer_client (MetaWaylandPointer       *pointer,
+@@ -293,6 +304,16 @@ meta_wayland_pointer_cleanup_pointer_client (MetaWaylandPointer       *pointer,
                                               MetaWaylandPointerClient *pointer_client,
                                               struct wl_client         *client)
  {
@@ -1058,11 +1104,110 @@ index ec3447d..437e6ec 100644
    if (meta_wayland_pointer_client_is_empty (pointer_client))
      {
        if (pointer->focus_client == pointer_client)
-@@ -457,6 +475,122 @@ meta_wayland_pointer_send_motion (MetaWaylandPointer *pointer,
+@@ -457,6 +478,221 @@ meta_wayland_pointer_send_motion (MetaWaylandPointer *pointer,
    meta_wayland_pointer_broadcast_frame (pointer);
  }
  
 +#ifdef HAVE_XWAYLAND
++typedef struct
++{
++  struct wl_resource *resource;
++  struct wl_resource *target;
++  struct wl_listener target_destroyed;
++  struct wl_list link;
++  MetaWaylandPointer *pointer;
++} LegacyPointerHandoff;
++
++static void
++legacy_handoff_target_destroyed (struct wl_listener *listener, void *data)
++{
++  LegacyPointerHandoff *handoff =
++    wl_container_of (listener, handoff, target_destroyed);
++
++  wl_list_remove (&handoff->target_destroyed.link);
++  handoff->target = NULL;
++}
++
++static void
++legacy_handoff_destroyed (struct wl_resource *resource)
++{
++  LegacyPointerHandoff *handoff = wl_resource_get_user_data (resource);
++
++  if (handoff->target)
++    wl_list_remove (&handoff->target_destroyed.link);
++  wl_list_remove (&handoff->link);
++  g_object_unref (handoff->pointer);
++  g_free (handoff);
++}
++
++static void
++legacy_protocol_destroy (struct wl_client *client, struct wl_resource *resource)
++{
++  wl_resource_destroy (resource);
++}
++
++static const struct mutter_unmuted_pointer_v1_interface legacy_handoff_impl = {
++  .destroy = legacy_protocol_destroy,
++};
++
++static void
++legacy_get_pointer (struct wl_client *client, struct wl_resource *manager,
++                    uint32_t id, struct wl_resource *target)
++{
++  MetaWaylandPointer *pointer = wl_resource_get_user_data (target);
++  LegacyPointerHandoff *handoff;
++
++  if (!pointer)
++    {
++      wl_resource_post_error (manager, WL_DISPLAY_ERROR_INVALID_OBJECT,
++                              "inactive pointer");
++      return;
++    }
++  handoff = g_new0 (LegacyPointerHandoff, 1);
++  handoff->resource = wl_resource_create (client,
++    &mutter_unmuted_pointer_v1_interface, 1, id);
++  if (!handoff->resource)
++    {
++      g_free (handoff);
++      wl_client_post_no_memory (client);
++      return;
++    }
++  handoff->pointer = g_object_ref (pointer);
++  handoff->target = target;
++  handoff->target_destroyed.notify = legacy_handoff_target_destroyed;
++  wl_resource_add_destroy_listener (target, &handoff->target_destroyed);
++  wl_list_insert (&pointer->legacy_handoffs, &handoff->link);
++  wl_resource_set_implementation (handoff->resource, &legacy_handoff_impl,
++                                   handoff, legacy_handoff_destroyed);
++}
++
++static const struct mutter_unmuted_manager_v1_interface legacy_manager_impl = {
++  .destroy = legacy_protocol_destroy,
++  .get_pointer = legacy_get_pointer,
++};
++
++static void
++bind_legacy_manager (struct wl_client *client, void *data,
++                     uint32_t version, uint32_t id)
++{
++  MetaWaylandCompositor *compositor = data;
++  struct wl_resource *resource;
++
++  if (client != compositor->xwayland_manager.client)
++    {
++      wl_client_post_implementation_error (client,
++        "Mutter Unmuted is restricted to the compositor's Xwayland client");
++      return;
++    }
++  resource = wl_resource_create (client, &mutter_unmuted_manager_v1_interface, 1, id);
++  if (!resource)
++    {
++      wl_client_post_no_memory (client);
++      return;
++    }
++  wl_resource_set_implementation (resource, &legacy_manager_impl, compositor, NULL);
++}
++
 +/* Only extra buttons are exposed to the shared X server when opted in.
 + * This deliberately does not create a pointer enter or change focus. */
 +static void
@@ -1181,7 +1326,7 @@ index ec3447d..437e6ec 100644
  static void
  meta_wayland_pointer_send_button (MetaWaylandPointer *pointer,
                                    const ClutterEvent *event)
-@@ -466,6 +600,10 @@ meta_wayland_pointer_send_button (MetaWaylandPointer *pointer,
+@@ -466,6 +702,10 @@ meta_wayland_pointer_send_button (MetaWaylandPointer *pointer,
  
    event_type = clutter_event_type (event);
  
@@ -1192,7 +1337,7 @@ index ec3447d..437e6ec 100644
    if (pointer->focus_client &&
        !wl_list_empty (&pointer->focus_client->pointer_resources))
      {
-@@ -512,6 +650,13 @@ meta_wayland_pointer_enable (MetaWaylandPointer *pointer)
+@@ -512,6 +752,13 @@ meta_wayland_pointer_enable (MetaWaylandPointer *pointer)
    pointer->cursor_surface = NULL;
    pointer->cursor_shape = CLUTTER_CURSOR_INHERIT;
  
@@ -1206,7 +1351,7 @@ index ec3447d..437e6ec 100644
    g_signal_connect (cursor_tracker,
                      "cursor-changed",
                      G_CALLBACK (meta_wayland_pointer_on_cursor_changed),
-@@ -527,6 +672,14 @@ meta_wayland_pointer_disable (MetaWaylandPointer *pointer)
+@@ -527,6 +774,14 @@ meta_wayland_pointer_disable (MetaWaylandPointer *pointer)
    MetaBackend *backend = backend_from_pointer (pointer);
    MetaCursorTracker *cursor_tracker = meta_backend_get_cursor_tracker (backend);
  
@@ -1221,7 +1366,7 @@ index ec3447d..437e6ec 100644
    g_hash_table_foreach (pointer->pointer_clients,
                          make_resources_inert_foreach,
                          NULL);
-@@ -696,6 +849,15 @@ meta_wayland_pointer_update (MetaWaylandPointer *pointer,
+@@ -696,6 +951,15 @@ meta_wayland_pointer_update (MetaWaylandPointer *pointer,
    event_type = clutter_event_type (event);
    pointer->sprite = clutter_backend_get_sprite (clutter_backend, stage, event);
  
@@ -1237,33 +1382,36 @@ index ec3447d..437e6ec 100644
    if ((event_type == CLUTTER_MOTION ||
         event_type == CLUTTER_ENTER ||
         event_type == CLUTTER_LEAVE) &&
-@@ -1056,6 +1218,25 @@ meta_wayland_pointer_broadcast_enter (MetaWaylandPointer *pointer,
+@@ -1028,6 +1292,19 @@ meta_wayland_pointer_send_enter (MetaWaylandPointer *pointer,
+   meta_wayland_pointer_get_relative_coordinates (pointer, surface, &xf, &yf);
+   sx = wl_fixed_from_double (xf);
+   sy = wl_fixed_from_double (yf);
++#ifdef HAVE_XWAYLAND
++  LegacyPointerHandoff *handoff;
++  uint32_t mask = 0;
++
++  if (pointer->legacy_buttons_enabled && !legacy_pointer_is_inhibited (pointer))
++    for (uint32_t button = BTN_SIDE; button <= BTN_TASK; button++)
++      if (g_hash_table_contains (pointer->legacy_buttons, GUINT_TO_POINTER (button)))
++        mask |= 1u << (button - BTN_SIDE);
++  wl_list_for_each (handoff, &pointer->legacy_handoffs, link)
++    if (handoff->target == pointer_resource)
++      mutter_unmuted_pointer_v1_send_prepare_enter (handoff->resource, mask);
++#endif
++
+   wl_pointer_send_enter (pointer_resource,
+                          serial,
+                          surface->resource,
+@@ -1056,6 +1333,8 @@ meta_wayland_pointer_broadcast_enter (MetaWaylandPointer *pointer,
                                       serial, surface);
  
    meta_wayland_pointer_broadcast_frame (pointer);
 +
-+#ifdef HAVE_XWAYLAND
-+  /* Xwayland releases all buttons on wl_pointer.enter. Restore the extra
-+   * buttons that are still physically held after that reset, without
-+   * discarding their tracking or waiting for another physical press. */
-+  if (pointer->focus_client == pointer->legacy_button_client &&
-+      !legacy_pointer_is_inhibited (pointer))
-+    {
-+      GHashTableIter iter;
-+      gpointer button;
 +
-+      g_hash_table_iter_init (&iter, pointer->legacy_buttons);
-+      while (g_hash_table_iter_next (&iter, &button, NULL))
-+        send_legacy_button (pointer, pointer->legacy_button_client,
-+                            GPOINTER_TO_UINT (button),
-+                            (uint32_t) (g_get_monotonic_time () / 1000),
-+                            WL_POINTER_BUTTON_STATE_PRESSED);
-+    }
-+#endif
  }
  
  static void
-@@ -1108,6 +1289,14 @@ meta_wayland_pointer_set_focus (MetaWaylandPointer *pointer,
+@@ -1108,6 +1387,14 @@ meta_wayland_pointer_set_focus (MetaWaylandPointer *pointer,
    if (pointer->focus_surface == surface)
      return;
  
@@ -1278,11 +1426,26 @@ index ec3447d..437e6ec 100644
    pointer->last_rel_x = -FLT_MAX;
    pointer->last_rel_y = -FLT_MAX;
  
-@@ -1607,6 +1796,17 @@ meta_wayland_pointer_get_seat (MetaWaylandPointer *pointer)
+@@ -1577,6 +1864,13 @@ bind_relative_pointer_manager (struct wl_client *client,
+ void
+ meta_wayland_relative_pointer_init (MetaWaylandCompositor *compositor)
+ {
++#ifdef HAVE_XWAYLAND
++  if (!wl_global_create (compositor->wayland_display,
++                         &mutter_unmuted_manager_v1_interface, 1,
++                         compositor, bind_legacy_manager))
++    g_error ("Could not create Mutter Unmuted global");
++#endif
++
+   /* Relative pointer events are currently only supported by the native backend
+    * so lets just advertise the extension when the native backend is used.
+    */
+@@ -1607,6 +1901,18 @@ meta_wayland_pointer_get_seat (MetaWaylandPointer *pointer)
  static void
  meta_wayland_pointer_init (MetaWaylandPointer *pointer)
  {
 +#ifdef HAVE_XWAYLAND
++  wl_list_init (&pointer->legacy_handoffs);
 +  pointer->legacy_button_settings =
 +    g_settings_new ("org.gnome.mutter.wayland");
 +  pointer->legacy_buttons = g_hash_table_new (NULL, NULL);
@@ -1296,7 +1459,7 @@ index ec3447d..437e6ec 100644
    pointer->pointer_clients =
      g_hash_table_new_full (NULL, NULL, NULL,
                             (GDestroyNotify) meta_wayland_pointer_client_free);
-@@ -1617,6 +1817,12 @@ meta_wayland_pointer_finalize (GObject *object)
+@@ -1617,6 +1923,12 @@ meta_wayland_pointer_finalize (GObject *object)
  {
    MetaWaylandPointer *pointer = META_WAYLAND_POINTER (object);
  
@@ -1321,3 +1484,80 @@ index 4cf9b6c..c0d9749 100644
  void meta_wayland_pointer_focus_surface (MetaWaylandPointer *pointer,
                                           MetaWaylandSurface *surface);
  
+diff --git a/src/wayland/meta-xwayland.c b/src/wayland/meta-xwayland.c
+index 2e2f7ad..fee0de5 100644
+--- a/src/wayland/meta-xwayland.c
++++ b/src/wayland/meta-xwayland.c
+@@ -65,6 +65,14 @@
+ #define X11_TMP_UNIX_PATH    "/tmp/.X11-unix/X"
+ 
+ static int display_number_override = -1;
++static char *test_xwayland_path;
++
++void
++meta_xwayland_override_path (const char *path)
++{
++  g_free (test_xwayland_path);
++  test_xwayland_path = g_strdup (path);
++}
+ 
+ static void meta_xwayland_stop_xserver (MetaXWaylandManager *manager);
+ 
+@@ -872,7 +880,7 @@ meta_xwayland_start_xserver (MetaXWaylandManager *manager,
+   g_subprocess_launcher_unsetenv (launcher, "DISPLAY");
+ 
+   i = 0;
+-  args[i++] = XWAYLAND_PATH;
++  args[i++] = test_xwayland_path ? test_xwayland_path : XWAYLAND_PATH;
+   args[i++] = manager->public_connection.name;
+   args[i++] = "-rootless";
+   args[i++] = "-noreset";
+diff --git a/src/wayland/meta-xwayland.h b/src/wayland/meta-xwayland.h
+index ed8540a..9b870d5 100644
+--- a/src/wayland/meta-xwayland.h
++++ b/src/wayland/meta-xwayland.h
+@@ -28,6 +28,9 @@
+ #include "meta/types.h"
+ #include "wayland/meta-wayland-types.h"
+ 
++META_EXPORT_TEST
++void meta_xwayland_override_path (const char *path);
++
+ META_EXPORT_TEST
+ void
+ meta_xwayland_override_display_number (int number);
+diff --git a/src/wayland/protocol/mutter-unmuted-v1.xml b/src/wayland/protocol/mutter-unmuted-v1.xml
+new file mode 100644
+index 0000000..72c8227
+--- /dev/null
++++ b/src/wayland/protocol/mutter-unmuted-v1.xml
+@@ -0,0 +1,29 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<protocol name="mutter_unmuted_v1">
++  <copyright>Copyright 2026 Mutter Unmuted contributors. SPDX-License-Identifier: MIT</copyright>
++  <interface name="mutter_unmuted_manager_v1" version="1">
++    <description summary="private Xwayland held-button handoff">
++      Experimental protocol restricted to the compositor's Xwayland client.
++      It grants no input access: compositor settings still control forwarding.
++    </description>
++    <request name="destroy" type="destructor"/>
++    <request name="get_pointer">
++      <arg name="id" type="new_id" interface="mutter_unmuted_pointer_v1"/>
++      <arg name="pointer" type="object" interface="wl_pointer"/>
++    </request>
++  </interface>
++  <interface name="mutter_unmuted_pointer_v1" version="1">
++    <request name="destroy" type="destructor"/>
++    <event name="prepare_enter">
++      <description summary="preserve these buttons on the next pointer enter">
++        Sent immediately before wl_pointer.enter on the associated pointer.
++        Bits 0 through 4 correspond to Linux BTN_SIDE through BTN_TASK (X11
++        physical button numbers 8 through 12). Only those held buttons may
++        bypass the client's synthetic enter-time release. Consume this mask
++        on the next enter; without a fresh event preserve nothing. Physical
++        releases and compositor cancellation are always processed normally.
++      </description>
++      <arg name="buttons" type="uint"/>
++    </event>
++  </interface>
++</protocol>

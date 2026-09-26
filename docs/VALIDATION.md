@@ -1,70 +1,57 @@
 # Validation
 
-Tested build: Mutter `50.4-1.legacy3.fc44`, with Nobara packaging options.
-GNOME Shell: 50.4. Distribution: Nobara 44. Discord: official RPM through Xwayland.
+## Current coordinated revision: .unmuted3
 
-Final RPM `%check` results:
+Built against Mutter 50.4 / GNOME Shell 50.4 and Xwayland 24.1.13 on Nobara 44.
+The installed upstream versions are detected independently by `install.sh`;
+these versions describe the tested setup, not a fixed installer requirement.
+
+The final Mutter RPM build tested against the executable extracted from the
+patched Xwayland runtime RPM:
 
 ```text
-mutter:xwayland               OK    2.56s
-mutter:xwayland-legacy-input  OK   11.61s
-Ok: 2
-Fail: 0
+mutter:xwayland               OK    2.51s
+mutter:xwayland-legacy-input  OK   14.18s
 ```
 
-The added integration suite checks:
+The integration tests start a separate headless Mutter, real Xwayland and a
+native Wayland client. An XI2.2 observer checks:
 
-- Default-off behavior, non-character filtering and Ctrl+A release order.
-- All-key press/release delivery and cancellation on settings changes.
+- Default-off behavior, keyboard filters and modifier release order.
 - All five extra mouse buttons, simultaneous holds and primary-button exclusion.
-- Press/release over empty desktop space and holds across window/desktop boundaries.
-- Continued forwarding through Shell grabs, including grabs starting with no focus.
-- Immediate held-key and held-button release when remote access is inhibited.
-- Suppression during inhibition, nested inhibition and resuming after uninhibition.
-- No extra late mouse release after a lock-triggered cancellation.
-- Normal focused-Xwayland delivery without duplicates.
-- A mouse hold crossing from Xwayland to a native Wayland window.
+- Desktop, native-window and Shell-grab forwarding.
+- Desktop-to-Xwayland entry with all five buttons held: **zero releases and zero
+  replacement presses**, followed by exactly five physical releases.
+- The same handoff followed by returning to the desktop before physical release.
+- Ordinary Xwayland enter-time reset when forwarding is disabled.
+- Cancellation on settings changes and lock inhibition; no forwarding while
+  inhibited, including nested inhibition, and resumption afterward.
+- Focused-Xwayland duplicate prevention and Xwayland-to-native holds.
 
-The upstream suite runs separately to preserve its startup/keymap assumptions.
-The lock test calls the controller GNOME Shell uses synchronously when locking;
-it does not run a complete Shell lock screen or enter authentication credentials.
+The handoff regression explicitly retargets focus because the minimal headless
+stage otherwise retains its desktop implicit grab. Tests exercise GNOME Shell's
+synchronous lock-inhibition controller, not a complete authentication screen.
+The new coordinated revision still needs a live Wine/Discord check after login.
 
-The original user reported that the final revision works in their live GNOME
-session after installation. This is validation of one setup, not a claim of
-compatibility with all applications, distributions or future GNOME versions.
+Three standalone Xwayland suites also pass: `request-length`,
+`damage-primitives` and `sync`. The full external XTS suite was not run.
+Nine installer/spec tests pass with fake package commands; they never call
+real sudo or DNF. These cover version detection, a single paired runtime
+transaction, build-only mode, source mismatch, either build failing, and spec
+adaptation. A simulated different upstream version tests installer control flow,
+not actual source compatibility with that version.
 
-## Source-only installer validation
+The complete `install.sh --build-only` path also built both matching source
+RPMs and passed the paired tests. Its sudo dependency commands were replaced
+with a validation harness because those dependencies were already installed;
+source extraction, spec adaptation, builds and tests ran normally. The final
+DNF preview resolves with the matching installed Xwayland-devel package included.
+No patched runtime packages were installed during validation.
 
-The version-detecting installer also completed a real `--build-only` run from
-the matching 50.4 source RPM. Dependency commands were replaced by a test harness
-because the required dependencies were already installed; the source unpack,
-spec adaptation, compilation, RPM creation and compositor tests ran normally.
-No runtime package installation was performed by this validation run.
+## Earlier revisions
 
-```text
-mutter:xwayland               OK    2.71s
-mutter:xwayland-legacy-input  OK   11.61s
-Installer/spec unit tests: 7 passed
-```
-
-The installer tests simulate another installed version (51.2) to check version
-selection and packaging control flow. That is not a real Mutter 51.2 build or
-a claim that the forwarding patch works on that version.
-
-## Xwayland entry hold fix (.unmuted2)
-
-Entering an Xwayland/Wine window used to cancel the tracked extra-button hold.
-Removing that cancellation alone was insufficient: Xwayland itself emits button
-releases on `wl_pointer.enter`. The patch now retains the hold and resends its
-press after entry. This restores PTT automatically but does not eliminate the
-brief X11 release/press transition.
-
-The regression explicitly retargets pointer focus from desktop to a real
-Xwayland surface while the button is held (the minimal headless stage otherwise
-retains its desktop implicit grab). It checks the reset/restoration pair, then
-exactly one physical release, both inside Xwayland and after returning to the
-desktop. Existing lock-inhibition tests continue to pass.
-
-Development build: upstream Xwayland suite passed (2.74s), legacy-input suite
-passed (13.61s); seven installer/spec tests passed. Wine/Discord behavior after
-installing this revision still needs a live check.
+The original Mutter-only implementation was confirmed working by the original
+user across their GNOME session, but Xwayland pointer entry ended held PTT.
+The .unmuted2 resend workaround restored PTT but created a release/press pair
+that caused Discord's audible PTT notifications. The coordinated .unmuted3
+protocol replaces that workaround; no enter-time button replay remains.

@@ -5,7 +5,10 @@ import sys
 from pathlib import Path
 
 
-def prepare(text, version, release):
+def prepare(text, version, release, package="mutter"):
+    if package not in ("mutter", "xwayland"):
+        raise ValueError("Unknown patch target")
+    patch_name = "mutter-unmuted.patch" if package == "mutter" else "xwayland-unmuted.patch"
     if not re.search(r'^%autosetup\b', text, re.M):
         raise ValueError('This spec does not use %autosetup; manual adaptation is required.')
     if re.search(r'^%autosetup[^\n]*\s-N(?:\s|$)', text, re.M):
@@ -13,19 +16,22 @@ def prepare(text, version, release):
     if not re.search(r'^%prep\b', text, re.M) or not re.search(r'^%install\b', text, re.M):
         raise ValueError('Missing expected RPM sections; manual adaptation is required.')
     # Rebuilding our previous SRPM replaces the existing patch instead of applying it twice.
-    text = re.sub(r'^Patch\d*:\s*.*(?:mutter-50\.4-legacy-input|mutter-unmuted)\.patch\s*$', '', text, flags=re.M)
+    text = re.sub(r'^Patch\d*:\s*.*(?:mutter-50\.4-legacy-input|mutter-unmuted|xwayland-unmuted)\.patch\s*$', '', text, flags=re.M)
     text, count = re.subn(r'^Version:\s*.*$', f'Version: {version}', text, count=1, flags=re.M)
     if count != 1:
         raise ValueError('Missing Version tag.')
-    text, count = re.subn(r'^Release:\s*.*$', f'Release: {release}.unmuted2', text, count=1, flags=re.M)
+    text, count = re.subn(r'^Release:\s*.*$', f'Release: {release}.unmuted3', text, count=1, flags=re.M)
     if count != 1:
         raise ValueError('Missing Release tag.')
     # Explicitly numbered high patch avoids collisions with distro auto numbering.
     numbers = [int(n) for n in re.findall(r'^Patch(\d+):', text, re.M)]
     number = max([9999, *numbers]) + 1
-    text, count = re.subn(r'^%description\b', f'Patch{number}: mutter-unmuted.patch\n\n%description', text, count=1, flags=re.M)
+    text, count = re.subn(r'^%description\b', f'Patch{number}: {patch_name}\n\n%description', text, count=1, flags=re.M)
     if count != 1:
         raise ValueError('Missing main description boundary.')
+    if package == 'xwayland':
+        # Keep distribution checks; paired Mutter tests exercise this RPM's binary.
+        return text
     check = 'env -u GDK_BACKEND -u XAUTHORITY meson test -C %{_vpath_builddir} xwayland xwayland-legacy-input --print-errorlogs'
     if 'xwayland-legacy-input --print-errorlogs' not in text:
         if re.search(r'^%check\s*$', text, re.M):
@@ -38,7 +44,7 @@ def prepare(text, version, release):
 if __name__ == '__main__':
     path = Path(sys.argv[1])
     try:
-        result = prepare(path.read_text(), sys.argv[2], sys.argv[3])
+        result = prepare(path.read_text(), sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else "mutter")
     except ValueError as error:
         sys.exit(str(error))
     path.write_text(result)

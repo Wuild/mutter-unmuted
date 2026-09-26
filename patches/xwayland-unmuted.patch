@@ -1,0 +1,173 @@
+From: Mutter Unmuted contributors <noreply@localhost>
+Date: Sat, 26 Sep 2026 12:00:00 +0000
+Subject: [PATCH] Preserve compositor-confirmed held buttons across pointer entry
+
+---
+diff --git a/hw/xwayland/meson.build b/hw/xwayland/meson.build
+index 9fff644..ea827e0 100644
+--- a/hw/xwayland/meson.build
++++ b/hw/xwayland/meson.build
+@@ -67,6 +67,8 @@ code = generator(scanner,
+     output : '@BASENAME@-protocol.c',
+     arguments : [scanner_argument, '@INPUT@', '@OUTPUT@']
+ )
++srcs += client_header.process('mutter-unmuted-v1.xml')
++srcs += code.process('mutter-unmuted-v1.xml')
+ srcs += client_header.process(relative_xml)
+ srcs += client_header.process(pointer_xml)
+ srcs += client_header.process(gestures_xml)
+diff --git a/hw/xwayland/mutter-unmuted-v1.xml b/hw/xwayland/mutter-unmuted-v1.xml
+new file mode 100644
+index 0000000..72c8227
+--- /dev/null
++++ b/hw/xwayland/mutter-unmuted-v1.xml
+@@ -0,0 +1,29 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<protocol name="mutter_unmuted_v1">
++  <copyright>Copyright 2026 Mutter Unmuted contributors. SPDX-License-Identifier: MIT</copyright>
++  <interface name="mutter_unmuted_manager_v1" version="1">
++    <description summary="private Xwayland held-button handoff">
++      Experimental protocol restricted to the compositor's Xwayland client.
++      It grants no input access: compositor settings still control forwarding.
++    </description>
++    <request name="destroy" type="destructor"/>
++    <request name="get_pointer">
++      <arg name="id" type="new_id" interface="mutter_unmuted_pointer_v1"/>
++      <arg name="pointer" type="object" interface="wl_pointer"/>
++    </request>
++  </interface>
++  <interface name="mutter_unmuted_pointer_v1" version="1">
++    <request name="destroy" type="destructor"/>
++    <event name="prepare_enter">
++      <description summary="preserve these buttons on the next pointer enter">
++        Sent immediately before wl_pointer.enter on the associated pointer.
++        Bits 0 through 4 correspond to Linux BTN_SIDE through BTN_TASK (X11
++        physical button numbers 8 through 12). Only those held buttons may
++        bypass the client's synthetic enter-time release. Consume this mask
++        on the next enter; without a fresh event preserve nothing. Physical
++        releases and compositor cancellation are always processed normally.
++      </description>
++      <arg name="buttons" type="uint"/>
++    </event>
++  </interface>
++</protocol>
+diff --git a/hw/xwayland/xwayland-input.c b/hw/xwayland/xwayland-input.c
+index 8231c10..6aa81e3 100644
+--- a/hw/xwayland/xwayland-input.c
++++ b/hw/xwayland/xwayland-input.c
+@@ -42,6 +42,7 @@
+ 
+ #include "xwayland-cursor.h"
+ #include "xwayland-input.h"
++#include "mutter-unmuted-v1-client-protocol.h"
+ #include "xwayland-window.h"
+ #include "xwayland-screen.h"
+ 
+@@ -527,6 +528,10 @@ pointer_handle_enter(void *data, struct wl_pointer *pointer,
+     ValuatorMask mask;
+     DeviceEvent enter;
+ 
++    /* A fresh compositor mask applies to this enter only. */
++    uint32_t preserved = xwl_seat->unmuted_enter_buttons;
++    xwl_seat->unmuted_enter_buttons = 0;
++
+     /* There's a race here where if we create and then immediately
+      * destroy a surface, we might end up in a state where the Wayland
+      * compositor sends us an event for a surface that doesn't exist.
+@@ -573,7 +578,8 @@ pointer_handle_enter(void *data, struct wl_pointer *pointer,
+      * any X window, but for now just send the events. */
+     valuator_mask_zero(&mask);
+     for (i = 0; i < dev->button->numButtons; i++)
+-        if (BitIsOn(dev->button->down, i))
++        if (BitIsOn(dev->button->down, i) &&
++            !(i >= 8 && i <= 12 && (preserved & (1u << (i - 8)))))
+             QueuePointerEvents(dev, ButtonRelease, i, 0, &mask);
+ 
+     /* The last cursor frame we committed before the pointer left one
+@@ -1707,12 +1713,36 @@ enable_device(struct xwl_seat *xwl_seat, DeviceIntPtr dev)
+ }
+ 
+ 
++static void
++unmuted_prepare_enter(void *data, struct mutter_unmuted_pointer_v1 *pointer,
++                      uint32_t buttons)
++{
++    struct xwl_seat *seat = data;
++    seat->unmuted_enter_buttons = buttons & 0x1f;
++}
++
++static const struct mutter_unmuted_pointer_v1_listener unmuted_listener = {
++    .prepare_enter = unmuted_prepare_enter,
++};
++
++static void
++init_unmuted_pointer(struct xwl_seat *seat)
++{
++    if (!seat->unmuted_pointer && seat->wl_pointer && seat->xwl_screen->unmuted_manager) {
++        seat->unmuted_pointer = mutter_unmuted_manager_v1_get_pointer(
++            seat->xwl_screen->unmuted_manager, seat->wl_pointer);
++        mutter_unmuted_pointer_v1_add_listener(seat->unmuted_pointer,
++                                               &unmuted_listener, seat);
++    }
++}
++
+ static void
+ init_pointer(struct xwl_seat *xwl_seat)
+ {
+     xwl_seat->wl_pointer = wl_seat_get_pointer(xwl_seat->seat);
+     wl_pointer_add_listener(xwl_seat->wl_pointer,
+                             &pointer_listener, xwl_seat);
++    init_unmuted_pointer(xwl_seat);
+ 
+     if (xwl_seat->pointer == NULL) {
+         xwl_seat_set_cursor(xwl_seat);
+@@ -1726,6 +1756,11 @@ init_pointer(struct xwl_seat *xwl_seat)
+ static void
+ release_pointer(struct xwl_seat *xwl_seat)
+ {
++    if (xwl_seat->unmuted_pointer) {
++        mutter_unmuted_pointer_v1_destroy(xwl_seat->unmuted_pointer);
++        xwl_seat->unmuted_pointer = NULL;
++    }
++    xwl_seat->unmuted_enter_buttons = 0;
+     wl_pointer_release(xwl_seat->wl_pointer);
+     xwl_seat->wl_pointer = NULL;
+ 
+@@ -3152,6 +3187,12 @@ input_handler(void *data, struct wl_registry *registry, uint32_t id,
+     if (strcmp(interface, wl_seat_interface.name) == 0 && version >= 3) {
+         create_input_device(xwl_screen, id, version);
+         xwl_screen->expecting_event++;
++    } else if (strcmp(interface, mutter_unmuted_manager_v1_interface.name) == 0) {
++        struct xwl_seat *seat;
++        xwl_screen->unmuted_manager = wl_registry_bind(registry, id,
++            &mutter_unmuted_manager_v1_interface, 1);
++        xorg_list_for_each_entry(seat, &xwl_screen->seat_list, link)
++            init_unmuted_pointer(seat);
+     } else if (strcmp(interface, zwp_relative_pointer_manager_v1_interface.name) == 0) {
+         init_relative_pointer_manager(xwl_screen, id, version);
+         maybe_init_relative_pointer_listeners_after_capabilities(xwl_screen);
+diff --git a/hw/xwayland/xwayland-input.h b/hw/xwayland/xwayland-input.h
+index 9a2a40d..aef7be0 100644
+--- a/hw/xwayland/xwayland-input.h
++++ b/hw/xwayland/xwayland-input.h
+@@ -65,6 +65,8 @@ struct xwl_seat {
+     struct xwl_screen *xwl_screen;
+     struct wl_seat *seat;
+     struct wl_pointer *wl_pointer;
++    struct mutter_unmuted_pointer_v1 *unmuted_pointer;
++    uint32_t unmuted_enter_buttons;
+     struct zwp_relative_pointer_v1 *wp_relative_pointer;
+     struct zwp_pointer_gesture_swipe_v1 *wp_pointer_gesture_swipe;
+     struct zwp_pointer_gesture_pinch_v1 *wp_pointer_gesture_pinch;
+diff --git a/hw/xwayland/xwayland-screen.h b/hw/xwayland/xwayland-screen.h
+index 9751bd2..4efe888 100644
+--- a/hw/xwayland/xwayland-screen.h
++++ b/hw/xwayland/xwayland-screen.h
+@@ -100,6 +100,7 @@ struct xwl_screen {
+     struct wl_registry *registry;
+     struct wl_registry *input_registry;
+     struct wl_compositor *compositor;
++    struct mutter_unmuted_manager_v1 *unmuted_manager;
+     struct zwp_tablet_manager_v2 *tablet_manager;
+     struct wl_shm *shm;
+     struct xdg_wm_base *xdg_wm_base;
