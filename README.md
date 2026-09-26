@@ -2,17 +2,19 @@
 
 **Push to talk, across your GNOME desktop.**
 
-An opt-in pair of Mutter and Xwayland patches that lets legacy X11 applications receive selected keyboard
-and extra mouse-button input while you use GNOME on Wayland. Built to make
+An opt-in pair of Mutter and Xwayland patches that lets legacy X11 applications
+receive selected keyboard and extra mouse-button input while you use GNOME on
+Wayland. Built to make
 Discord's forward-thumb-button push to talk work across native Wayland apps,
 the empty desktop, overview, app grid and Shell menus.
 
 **Forward while unlocked. Stop at the lock screen.**
 
 This is an experimental community patch, tested with **Mutter 50.4 / GNOME Shell
-50.4 and Xwayland 24.1.13 on Nobara 44**. The installer detects the installed version of each component and builds both
-from matching distribution sources; it is not pinned to those versions. It is inspired by KDE's legacy X11 input support and is
-not an official GNOME, KDE or Discord project.
+50.4 and Xwayland 24.1.13 on Nobara 44**. The installer detects the installed
+version of each component and builds both from matching distribution sources.
+It is inspired by KDE's legacy X11 input support and is not an official GNOME,
+KDE or Discord project.
 
 The current revision preserves held mouse PTT when crossing into Xwayland/Wine
 windows **without an artificial release/press pair**. Both patched components
@@ -35,6 +37,8 @@ implement the Global Shortcuts portal. It does not add portal support to Discord
 - Forwards five extra mouse buttons: side, extra, forward, back and task.
 - Offers four keyboard modes, from disabled to all keys.
 - Continues through native applications, desktop space, overview, app grid and menus.
+- Preserves held PTT when entering and leaving Xwayland/Wine windows, without
+  generating a release/repress cycle.
 - Releases forwarded holds and blocks new forwarded input when GNOME locks.
 - Preserves normal input delivery and avoids duplicate delivery to focused Xwayland.
 - Uses persistent GSettings controls. Both features default to **off**.
@@ -61,8 +65,7 @@ It builds Xwayland first, then tests Mutter against that freshly built Xwayland
 executable. Only after both builds and the paired tests pass does it install
 `mutter`, `mutter-common` and `xorg-x11-server-Xwayland` together, plus matching
 already-installed companion packages such as `Xwayland-devel` that require the
-exact runtime release. It asks for
-sudo when needed and shows DNF transaction prompts. Allow several minutes; the
+exact runtime release. It asks for sudo when needed and shows DNF transaction prompts. Allow several minutes; the
 build directory and log path are printed at startup.
 
 If your repositories no longer provide the exact source, use
@@ -81,16 +84,33 @@ See [the build guide](docs/BUILDING.md) for manual steps or other distributions.
 Built packages keep each installed upstream version and add `.unmuted3` to its
 distribution release. Re-running the installer rebuilds and reinstalls that local release.
 
-This repository contains source and packaging, not prebuilt RPMs. Automatic RPM packaging is implemented for Fedora/Nobara; other distributions
-need their own packaging integration. After installing, **log out and back in**
+This repository contains source and packaging, not prebuilt RPMs. Automatic
+RPM packaging is implemented for Fedora/Nobara; other distributions need their
+own packaging integration. After installing, **log out and back in**
 to start the patched compositor; the running Wayland session does not change
 when a package is installed.
 
-After a distribution update to **either** component, rerun `./install.sh`.
-It detects the newly installed versions and rebuilds both. If the required
-sources are unavailable, a patch conflicts, or paired tests fail, it stops
-before installing either local build. No version pinning or background updater
-is added. Until both patches are present again, seamless handoff is not assured.
+## Update or rebuild after system updates
+
+From your existing checkout:
+
+```bash
+git pull --ff-only
+./install.sh
+```
+
+Then **log out and back in**. Existing forwarding settings carry over.
+
+Use the same commands after a distribution update to **either Mutter or
+Xwayland**. The installer detects both currently installed versions, fetches
+matching sources, reapplies both patches, and tests the pair before installing
+it. You do not need to edit version numbers manually.
+
+Version detection does not guarantee every future release is compatible. If
+sources are unavailable, a patch conflicts, or paired tests fail, the installer
+stops before installing either local build. No version pinning or background
+updater is added. Until both patches are present again, seamless handoff is not
+assured.
 
 ## Enable it
 
@@ -134,7 +154,10 @@ PTT does not require keyboard forwarding.
 3. Join a voice channel and test press **and release** with a native Wayland app
    focused, over empty desktop space, in overview, in the app grid and with a
    Shell menu open.
-4. Lock while holding PTT: transmission should stop. New presses while locked
+4. Hold PTT over the desktop, move into a Wine/Xwayland window, and move back
+   out without releasing. Transmission should continue without Discord playing
+   its PTT stop/start sounds. Release the button and verify transmission stops.
+5. Lock while holding PTT: transmission should stop. New presses while locked
    should do nothing. After unlocking, release and press again to resume.
 
 An optional native Wayland test window is included:
@@ -155,8 +178,10 @@ gsettings set org.gnome.mutter.wayland xwayland-legacy-keyboard-mode 'disabled'
 ```
 
 To remove the patch completely, reinstall your distribution's matching stock
-`mutter` and `mutter-common` packages, then log out and back in. Keep those stock
-packages available before replacing a compositor. Distribution updates can
+`mutter`, `mutter-common` and `xorg-x11-server-Xwayland` packages, along with
+matching installed companion packages such as `xorg-x11-server-Xwayland-devel`.
+Then log out and back in. Keep those stock packages available before replacing
+the compositor and Xwayland. Distribution updates can
 replace this build; rebase the patch instead of indefinitely pinning Mutter.
 
 ## How it works
@@ -187,8 +212,9 @@ respected. This avoids treating every overview or menu grab as a lock screen.
 This boundary targets a **physical GNOME session**. GNOME Shell skips that
 remote-access call in headless sessions; any other caller inhibiting remote
 access also stops forwarding. Events consumed earlier by input-capture,
-accessibility or text-input filters are outside this hook. Applying and compiling successfully on another version is not proof that its
-Shell lock behavior is unchanged. Other Mutter/Shell versions need live
+accessibility or text-input filters are outside this hook. Applying and
+compiling successfully on another version is not proof that its Shell lock
+behavior is unchanged. Other Mutter/Shell versions need live
 lock-screen testing; the confirmed setup remains GNOME 50.4.
 
 ## Validation
@@ -197,9 +223,14 @@ The upstream Xwayland suite and the added integration suite passed in the final
 RPM build. Tests use a separate headless Mutter instance, a real Xwayland server,
 a native Wayland client and an XI2.2 observer. They cover input filtering,
 press/release pairing, desktop transitions, Shell grabs, lock inhibition,
-nested inhibition and duplicate prevention.
+nested inhibition and duplicate prevention. The coordinated handoff test holds
+all five extra buttons across pointer entry and verifies **zero release or
+replacement-press events**, followed by the expected physical releases.
 
-The original user confirmed the final revision works in their live GNOME setup.
+The complete build-only installer path, three standalone Xwayland test suites
+and nine installer/spec tests also passed. The earlier Mutter-only behavior
+was confirmed in the original user's live GNOME session; the new coordinated
+revision still needs a live Wine/Discord check after installation.
 Automated lock tests exercise the controller signal used by Shell, rather than
 running a full GNOME authentication screen. See [validation details](docs/VALIDATION.md).
 
@@ -212,7 +243,7 @@ running a full GNOME authentication screen. See [validation details](docs/VALIDA
 - `tests/`: isolated installer and packaging checks.
 - `docs/`: build instructions and validation notes.
 
-When reporting an issue, include distribution, Mutter and GNOME Shell versions,
+When reporting an issue, include distribution, Mutter, GNOME Shell and Xwayland versions,
 Discord launch mode, forwarding settings, and whether press or release fails.
 Specify whether it happens in an app, the desktop, overview, app grid or a menu.
 
