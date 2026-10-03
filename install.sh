@@ -3,13 +3,14 @@
 set -euo pipefail
 usage() {
   cat <<'HELP'
-Usage: ./install.sh [--build-only] [--yes] [--jobs N] [--source-rpm FILE] [--xwayland-source-rpm FILE]
+Usage: ./install.sh [--build-only] [--skip-dependency-install] [--yes] [--jobs N] [--source-rpm FILE] [--xwayland-source-rpm FILE]
 
 Detect installed Mutter and Xwayland versions, obtain matching distribution source,
 install build dependencies, apply the patch, build/test RPMs and install them.
 Supports Fedora/Nobara RPM packaging; other distributions need a packaging port.
 Run without sudo. sudo is used only for dependency/package installation.
   --build-only       Build without installing the runtime packages.
+  --skip-dependency-install  Do not run privileged DNF dependency commands.
   --yes              Accept DNF transactions automatically.
   --jobs N           Parallel build jobs (default: at most 8).
   --source-rpm FILE  Use matching local Mutter source.
@@ -17,6 +18,7 @@ Run without sudo. sudo is used only for dependency/package installation.
 HELP
 }
 build_only=false
+skip_dependency_install=false
 assume_yes=false
 source_rpm=''
 xwayland_source_rpm=''
@@ -25,6 +27,7 @@ jobs=$(nproc)
 while (( $# )); do
   case "$1" in
     --build-only) build_only=true; shift ;;
+    --skip-dependency-install) skip_dependency_install=true; shift ;;
     --yes) assume_yes=true; shift ;;
     --source-rpm)
       [[ -n ${2:-} && -f $2 ]] || { echo '--source-rpm requires an existing file' >&2; exit 2; }
@@ -48,12 +51,20 @@ esac
 version=$(rpm -q --qf '%{VERSION}' mutter)
 release=$(rpm -q --qf '%{RELEASE}' mutter)
 arch=$(rpm -q --qf '%{ARCH}' mutter)
+shell_version=$(rpm -q --qf '%{VERSION}' gnome-shell)
+shell_release=$(rpm -q --qf '%{RELEASE}' gnome-shell)
 [[ $version =~ ^[0-9][A-Za-z0-9.~_+-]*$ && $release =~ ^[A-Za-z0-9._+~%-]+$ && $arch =~ ^[A-Za-z0-9_]+$ ]] || {
   echo 'Cannot determine a supported installed Mutter package version.' >&2; exit 1;
 }
 xwayland_version=$(rpm -q --qf '%{VERSION}' xorg-x11-server-Xwayland)
 xwayland_release=$(rpm -q --qf '%{RELEASE}' xorg-x11-server-Xwayland)
 xwayland_arch=$(rpm -q --qf '%{ARCH}' xorg-x11-server-Xwayland)
+[[ $version == 50.4 && $shell_version == 50.5 && $xwayland_version == 24.1.13 ]] || {
+  printf 'This revision targets the validated session stack: Mutter 50.4, GNOME Shell 50.5, and Xwayland 24.1.13.\n' >&2
+  printf 'Detected Mutter %s, GNOME Shell %s-%s, and Xwayland %s.\n' \
+    "$version" "$shell_version" "$shell_release" "$xwayland_version" >&2
+  exit 1
+}
 xwayland_base=$(printf '%s' "$xwayland_release" | sed -E 's/\.unmuted[0-9]+$//')
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # Strip this project's local release suffix when locating distribution sources.
@@ -65,8 +76,11 @@ mkdir -p "$build_root"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS,download}
 log="$build_root/build.log"
 dnf_flags=()
 $assume_yes && dnf_flags+=(-y)
-printf 'Detected Mutter %s-%s (%s). Build directory: %s\n' "$version" "$release" "$arch" "$build_root"
-sudo dnf install "${dnf_flags[@]}" rpm-build dnf5-plugins curl python3 cpio patch git-core
+printf 'Detected Mutter %s-%s (%s), GNOME Shell %s-%s. Build directory: %s\n' \
+  "$version" "$release" "$arch" "$shell_version" "$shell_release" "$build_root"
+if ! $skip_dependency_install; then
+  sudo dnf install "${dnf_flags[@]}" rpm-build dnf5-plugins curl python3 cpio patch git-core
+fi
 if [[ -z $source_rpm ]]; then
   echo 'Downloading the exact matching distribution source RPM.'
   if dnf download --source --destdir "$build_root/download" "mutter-${version}-${base_release}.${arch}"; then
@@ -102,12 +116,16 @@ else
   exit 1
 fi
 echo "Detected Xwayland $xwayland_version-$xwayland_release ($xwayland_arch)."
-bash "$root/tools/build-xwayland.sh" "$root" "$build_root/xwayland"   "$xwayland_version" "$xwayland_base" "$xwayland_arch" "$jobs" "$assume_yes" "$xwayland_source_rpm"
+bash "$root/tools/build-xwayland.sh" "$root" "$build_root/xwayland" \
+  "$xwayland_version" "$xwayland_base" "$xwayland_arch" "$jobs" \
+  "$assume_yes" "$xwayland_source_rpm" "$skip_dependency_install"
 # Only the test context reads this variable; installed Mutter keeps its normal path.
 export MUTTER_TEST_XWAYLAND_PATH="$build_root/xwayland/extracted/usr/bin/Xwayland"
 python3 "$root/tools/prepare-spec.py" "$build_root/SPECS/mutter.spec" "$version" "$base_release"
-cp "$root/patches/mutter-50.4-legacy-input.patch" "$build_root/SOURCES/mutter-unmuted.patch"
-sudo dnf builddep "${dnf_flags[@]}" "$build_root/SPECS/mutter.spec"
+cp "$root/patches/mutter-50.4-unmuted.patch" "$build_root/SOURCES/mutter-unmuted.patch"
+if ! $skip_dependency_install; then
+  sudo dnf builddep "${dnf_flags[@]}" "$build_root/SPECS/mutter.spec"
+fi
 printf 'Applying patch, building and testing with %s jobs. Follow: tail -f %q\n' "$jobs" "$log"
 if ! rpmbuild -ba --define "_topdir $build_root" --define "_smp_build_ncpus $jobs" \
      "$build_root/SPECS/mutter.spec" > "$log" 2>&1; then
@@ -146,7 +164,7 @@ $build_only && exit 0
   echo 'Installed Xwayland changed during the build. Run this script again.' >&2; exit 1;
 }
 operation=install
-[[ $release == "${base_release}.unmuted3" && $xwayland_release == "${xwayland_base}.unmuted3" ]] && operation=reinstall
+[[ $release == "${base_release}.unmuted5" && $xwayland_release == "${xwayland_base}.unmuted5" ]] && operation=reinstall
 sudo dnf "$operation" "${dnf_flags[@]}" "${packages[@]}"
 cat <<'NEXT'
 Installed. Save your work, then log out and back in.

@@ -8,12 +8,12 @@ On Nobara or Fedora, run as your normal user:
 ./install.sh
 ```
 
-The script detects **version, release and architecture** independently for
-installed Mutter and `xorg-x11-server-Xwayland`.
+The script detects the installed Mutter, GNOME Shell, and Xwayland versions and
+requires the currently validated 50.4 / 50.5 / 24.1.13 session stack.
 It downloads the exact matching distribution source RPM for each with DNF and unpacks it
 into a fresh directory under `build/`. It preserves the distribution's build
 options, API version, dependencies, source files, patches and package layout.
-The spec adapter adds our patch, sets the same version with a local `.unmuted3`
+The spec adapter adds our patch, sets the same version with a local `.unmuted5`
 release suffix, and adds the Xwayland integration tests if they are not present.
 The existing distribution tests are preserved too.
 
@@ -35,6 +35,7 @@ Options:
 
 ```bash
 ./install.sh --build-only       # Dependencies + build/tests, no runtime installation
+./install.sh --build-only --skip-dependency-install # Use an existing toolchain
 ./install.sh --jobs 4           # Limit parallel build jobs (default at most 8)
 ./install.sh --yes              # Accept DNF transactions automatically
 ./install.sh --source-rpm /path/to/matching-mutter.src.rpm \
@@ -42,6 +43,8 @@ Options:
 ```
 
 Run without sudo; the script invokes sudo only for package/dependency operations.
+`--skip-dependency-install` is for an already prepared build host and does not
+skip compilation or tests.
 Local source RPMs must match the installed version and distribution release.
 Use a trusted distribution source RPM: RPM recipes execute build commands.
 Locally generated RPMs are unsigned unless you sign them yourself.
@@ -60,12 +63,13 @@ That recipe preserves Nobara's EGL-device option, 30-second responsiveness
 timeout, Tegra KMS patch and VRR/fractional-scaling schema override. It was
 adapted from Nobara's available 50.5 recipe to the tested 50.4 source.
 
-The forwarding patches were developed against Mutter 50.4 and Xwayland 24.1.13. Its filename records that
-baseline, not an installer version restriction. New or older source may need a
-rebase. The spec adapter requires `%autosetup` with patch application enabled;
-unrecognized preparation layouts stop for manual adaptation. Passing patch and
-build checks does not establish the lock boundary on another GNOME Shell version.
-Test lock/unlock behavior in the target physical GNOME session.
+The patches target Mutter 50.4 and Xwayland 24.1.13. A different Mutter,
+GNOME Shell, or Xwayland version requires an explicit rebase and validation
+before the installer guard is changed. The spec adapter requires `%autosetup`
+with patch application enabled; unrecognized preparation layouts stop for
+manual adaptation. Passing patch and build checks does not establish the lock
+boundary on another GNOME Shell version. Test lock/unlock behavior in the
+target physical GNOME session.
 
 ## Other distributions / manual application
 
@@ -75,8 +79,8 @@ not yet automate Debian, Ubuntu, Arch or other packaging formats.
 Apply each patch inside the matching component source directory. For Mutter:
 
 ```bash
-patch -p1 --dry-run < /path/to/mutter-unmuted/patches/mutter-50.4-legacy-input.patch
-patch -p1 < /path/to/mutter-unmuted/patches/mutter-50.4-legacy-input.patch
+patch -p1 --dry-run < /path/to/mutter-unmuted/patches/mutter-50.4-unmuted.patch
+patch -p1 < /path/to/mutter-unmuted/patches/mutter-50.4-unmuted.patch
 ```
 
 Follow Mutter's build instructions and preserve your distribution's patches.
@@ -88,7 +92,8 @@ then run the paired tests against the newly built Xwayland:
 env -u GDK_BACKEND -u XAUTHORITY \
   MUTTER_TEST_XWAYLAND_PATH=/path/to/patched/Xwayland \
   meson test -C /path/to/mutter-build \
-  xwayland xwayland-legacy-input --print-errorlogs
+  xwayland xwayland-legacy-input wayland-xdg-session-management \
+  --print-errorlogs
 ```
 
 Tests start isolated D-Bus, Wayland and Xwayland sessions, so the environment

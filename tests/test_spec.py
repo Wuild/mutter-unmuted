@@ -15,7 +15,7 @@ class SpecTests(unittest.TestCase):
     def test_preserves_packaging_and_changes_version(self):
         result = module.prepare(self.text, '51.2', '4.fc45')
         self.assertIn('Version: 51.2', result)
-        self.assertIn('Release: 4.fc45.unmuted3', result)
+        self.assertIn('Release: 4.fc45.unmuted5', result)
         self.assertIn('%meson -Degl_device=true', result)
         self.assertIn('mutter_increase_check_alive_timeout.patch', result)
         self.assertNotIn('mutter-50.4-legacy-input.patch', result)
@@ -26,7 +26,8 @@ class SpecTests(unittest.TestCase):
         first = module.prepare(self.text, '50.4', '1.fc44')
         second = module.prepare(first, '50.4', '1.fc44')
         self.assertEqual(second.count('mutter-unmuted.patch'), 1)
-        self.assertEqual(second.count('xwayland-legacy-input --print-errorlogs'), 1)
+        self.assertEqual(second.count('xwayland-legacy-input'), 1)
+        self.assertEqual(second.count('wayland-xdg-session-management'), 1)
 
     def test_xwayland_spec_keeps_its_checks(self):
         text = """Name: xorg-x11-server-Xwayland

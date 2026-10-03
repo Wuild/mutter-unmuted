@@ -1,5 +1,5 @@
 diff --git a/data/org.gnome.mutter.wayland.gschema.xml.in b/data/org.gnome.mutter.wayland.gschema.xml.in
-index c4dde1d..2f6996f 100644
+index c4dde1d15..2f6996f0f 100644
 --- a/data/org.gnome.mutter.wayland.gschema.xml.in
 +++ b/data/org.gnome.mutter.wayland.gschema.xml.in
 @@ -1,5 +1,12 @@
@@ -53,7 +53,7 @@ index c4dde1d..2f6996f 100644
        <default>false</default>
        <summary>Allow X11 grabs to lock keyboard focus with Xwayland</summary>
 diff --git a/src/backends/meta-remote-access-controller-private.h b/src/backends/meta-remote-access-controller-private.h
-index a738e68..1b1fe69 100644
+index a738e682e..1b1fe694d 100644
 --- a/src/backends/meta-remote-access-controller-private.h
 +++ b/src/backends/meta-remote-access-controller-private.h
 @@ -33,3 +33,6 @@ void meta_remote_access_handle_notify_stopped (MetaRemoteAccessHandle *handle);
@@ -64,7 +64,7 @@ index a738e68..1b1fe69 100644
 +/* GNOME Shell synchronously inhibits remote access in unlock-dialog mode. */
 +gboolean meta_remote_access_controller_is_inhibited (MetaRemoteAccessController *controller);
 diff --git a/src/backends/meta-remote-access-controller.c b/src/backends/meta-remote-access-controller.c
-index 82a25c8..eb3c417 100644
+index 82a25c8c8..eb3c417b4 100644
 --- a/src/backends/meta-remote-access-controller.c
 +++ b/src/backends/meta-remote-access-controller.c
 @@ -50,6 +50,7 @@ static GParamSpec *obj_props[N_PROPS];
@@ -133,8 +133,118 @@ index 82a25c8..eb3c417 100644
    controller_signals[CONTROLLER_NEW_HANDLE] =
      g_signal_new ("new-handle",
                    G_TYPE_FROM_CLASS (klass),
+diff --git a/src/core/meta-debug-control-private.h b/src/core/meta-debug-control-private.h
+index eee760685..96a655417 100644
+--- a/src/core/meta-debug-control-private.h
++++ b/src/core/meta-debug-control-private.h
+@@ -24,8 +24,6 @@ gboolean meta_debug_control_is_linear_blending_forced (MetaDebugControl *debug_c
+ 
+ gboolean meta_debug_control_is_hdr_forced (MetaDebugControl *debug_control);
+ 
+-gboolean meta_debug_control_is_session_management_protocol_enabled (MetaDebugControl *debug_control);
+-
+ gboolean meta_debug_control_is_hw_cursor_inhibited (MetaDebugControl *debug_control);
+ 
+ gboolean meta_debug_control_is_a11y_manager_without_access_control (MetaDebugControl *debug_control);
+diff --git a/src/core/meta-debug-control.c b/src/core/meta-debug-control.c
+index bdf59d0fa..ad6e5ad70 100644
+--- a/src/core/meta-debug-control.c
++++ b/src/core/meta-debug-control.c
+@@ -169,7 +169,6 @@ meta_debug_control_init (MetaDebugControl *debug_control)
+   MetaDBusDebugControl *dbus_debug_control =
+     META_DBUS_DEBUG_CONTROL (debug_control);
+   gboolean force_hdr, force_linear_blending;
+-  gboolean session_management_protocol;
+   gboolean inhibit_hw_cursor;
+   gboolean a11y_manager_without_access_control;
+ 
+@@ -181,11 +180,6 @@ meta_debug_control_init (MetaDebugControl *debug_control)
+   meta_dbus_debug_control_set_force_linear_blending (dbus_debug_control,
+                                                      force_linear_blending);
+ 
+-  session_management_protocol =
+-    g_strcmp0 (getenv ("MUTTER_DEBUG_SESSION_MANAGEMENT_PROTOCOL"), "1") == 0;
+-  meta_dbus_debug_control_set_session_management_protocol (dbus_debug_control,
+-                                                           session_management_protocol);
+-
+   inhibit_hw_cursor =
+     g_strcmp0 (getenv ("MUTTER_DEBUG_INHIBIT_HW_CURSOR"), "1") == 0;
+   meta_dbus_debug_control_set_inhibit_hw_cursor (dbus_debug_control,
+@@ -215,15 +209,6 @@ meta_debug_control_is_hdr_forced (MetaDebugControl *debug_control)
+   return meta_dbus_debug_control_get_force_hdr (dbus_debug_control);
+ }
+ 
+-gboolean
+-meta_debug_control_is_session_management_protocol_enabled (MetaDebugControl *debug_control)
+-{
+-  MetaDBusDebugControl *dbus_debug_control =
+-    META_DBUS_DEBUG_CONTROL (debug_control);
+-
+-  return meta_dbus_debug_control_get_session_management_protocol (dbus_debug_control);
+-}
+-
+ void
+ meta_debug_control_set_exported (MetaDebugControl *debug_control,
+                                  gboolean          exported)
+diff --git a/src/core/place.c b/src/core/place.c
+index 43ffd2fd0..306f90920 100644
+--- a/src/core/place.c
++++ b/src/core/place.c
+@@ -950,6 +950,21 @@ meta_window_place (MetaWindow        *window,
+ 
+   if (!window->showing_for_first_time)
+     logical_monitor = meta_window_get_main_logical_monitor (window);
++  else if (window->client_type == META_WINDOW_CLIENT_TYPE_WAYLAND &&
++           window->type == META_WINDOW_NORMAL &&
++           !meta_window_get_transient_for (window))
++    {
++      MetaMonitorManager *monitor_manager =
++        meta_backend_get_monitor_manager (backend);
++
++      /* Luna treats an unpositioned Wayland toplevel as a genuinely new
++       * window. Restored xdg-session-management toplevels already carry an
++       * explicit position and bypass normal placement. Keep new windows
++       * predictable by starting them on the primary monitor instead of the
++       * monitor containing the pointer at map time. */
++      logical_monitor =
++        meta_monitor_manager_get_primary_logical_monitor (monitor_manager);
++    }
+   else
+     logical_monitor = meta_backend_get_current_logical_monitor (backend);
+ 
+diff --git a/src/core/window.c b/src/core/window.c
+index 3cc26a252..0e54fb127 100644
+--- a/src/core/window.c
++++ b/src/core/window.c
+@@ -8086,7 +8086,25 @@ meta_window_calculate_bounds (MetaWindow *window,
+ {
+   MetaLogicalMonitor *main_monitor;
+ 
+-  main_monitor = meta_window_get_main_logical_monitor (window);
++  if (window->showing_for_first_time &&
++      window->client_type == META_WINDOW_CLIENT_TYPE_WAYLAND &&
++      window->type == META_WINDOW_NORMAL &&
++      !meta_window_get_transient_for (window))
++    {
++      MetaBackend *backend = backend_from_window (window);
++      MetaMonitorManager *monitor_manager =
++        meta_backend_get_monitor_manager (backend);
++
++      /* Match the initial configure bounds to Luna's new-window placement.
++       * Otherwise a client may size itself for the pointer monitor before it
++       * is centered on the primary monitor. */
++      main_monitor =
++        meta_monitor_manager_get_primary_logical_monitor (monitor_manager);
++    }
++  else
++    {
++      main_monitor = meta_window_get_main_logical_monitor (window);
++    }
+   if (main_monitor)
+     {
+       MtkRectangle work_area;
 diff --git a/src/meson.build b/src/meson.build
-index 9410646..aff87bc 100644
+index 9410646b5..aff87bcb2 100644
 --- a/src/meson.build
 +++ b/src/meson.build
 @@ -1054,6 +1054,7 @@ wayland_protocol_sources = []
@@ -146,7 +256,7 @@ index 9410646..aff87bc 100644
    ['color-representation', 'staging', 1, ],
    ['commit-timing', 'staging', 1, ],
 diff --git a/src/tests/meson.build b/src/tests/meson.build
-index 1bcad75..58e02bc 100644
+index 1bcad75c9..58e02bcc9 100644
 --- a/src/tests/meson.build
 +++ b/src/tests/meson.build
 @@ -1227,6 +1227,12 @@ if have_xwayland
@@ -163,7 +273,7 @@ index 1bcad75..58e02bc 100644
  endif
  
 diff --git a/src/tests/meta-context-test.c b/src/tests/meta-context-test.c
-index 0089517..df4abe5 100644
+index 008951714..df4abe580 100644
 --- a/src/tests/meta-context-test.c
 +++ b/src/tests/meta-context-test.c
 @@ -131,6 +131,7 @@ meta_context_test_configure (MetaContext   *context,
@@ -174,9 +284,258 @@ index 0089517..df4abe5 100644
  #endif
  
    meta_context_set_plugin_gtype (context, META_TYPE_TEST_SHELL);
+diff --git a/src/tests/wayland-test-clients/xdg-session-management-restore.c b/src/tests/wayland-test-clients/xdg-session-management-restore.c
+index 7654eca8f..71c2c5b11 100644
+--- a/src/tests/wayland-test-clients/xdg-session-management-restore.c
++++ b/src/tests/wayland-test-clients/xdg-session-management-restore.c
+@@ -29,6 +29,9 @@ typedef struct _TestDisplayState
+ } TestDisplayState;
+ 
+ static gboolean running = FALSE;
++static unsigned int expected_paints = 1;
++static GHashTable *painted_surfaces;
++static gboolean sync_requested;
+ 
+ static void
+ handle_registry_global (void               *user_data,
+@@ -125,14 +128,18 @@ on_toplevel_configured (WaylandSurface       *surface,
+ 
+ static void
+ simple (WaylandDisplay *display,
+-        const char     *session_id)
++        const char     *session_id,
++        gboolean        multiple_toplevels)
+ {
+   TestDisplayState *test_state = display->test_state;
+   g_autoptr (WaylandSurface) toplevel1 = NULL;
++  g_autoptr (WaylandSurface) toplevel2 = NULL;
+   struct xx_session_v1 *session;
+   struct xx_toplevel_session_v1 *toplevel_session1;
++  struct xx_toplevel_session_v1 *toplevel_session2 = NULL;
+   TestCreateState state = {};
+   ToplevelSessionState toplevel_state1 = {};
++  ToplevelSessionState toplevel_state2 = {};
+ 
+   toplevel1 = wayland_surface_new (display, "toplevel1",
+                                    100, 100, 0xff50ff50);
+@@ -161,12 +168,33 @@ simple (WaylandDisplay *display,
+                                        &toplevel_session_listener,
+                                        &toplevel_state1);
+ 
++  if (multiple_toplevels)
++    {
++      expected_paints = 2;
++      toplevel2 = wayland_surface_new (display, "toplevel2",
++                                       100, 100, 0xff5050ff);
++      g_signal_connect (toplevel2, "configure",
++                        G_CALLBACK (on_toplevel_configured),
++                        &toplevel_state2);
++      toplevel_session2 =
++        xx_session_v1_restore_toplevel (session,
++                                        toplevel2->xdg_toplevel,
++                                        "toplevel2");
++      xx_toplevel_session_v1_add_listener (toplevel_session2,
++                                           &toplevel_session_listener,
++                                           &toplevel_state2);
++    }
++
+   wl_surface_commit (toplevel1->wl_surface);
++  if (toplevel2)
++    wl_surface_commit (toplevel2->wl_surface);
+ 
+   running = TRUE;
+   while (running)
+     wayland_display_dispatch (display);
+ 
++  if (toplevel_session2)
++    xx_toplevel_session_v1_destroy (toplevel_session2);
+   xx_toplevel_session_v1_destroy (toplevel_session1);
+   xx_session_v1_destroy (session);
+ }
+@@ -175,14 +203,17 @@ static void
+ on_surface_painted (WaylandDisplay *display,
+                     WaylandSurface *surface)
+ {
+-  static gboolean first_painted = FALSE;
+-
+-  if (first_painted)
++  if (sync_requested)
+     return;
+ 
+-  first_painted = TRUE;
++  if (!painted_surfaces)
++    painted_surfaces = g_hash_table_new (g_direct_hash, g_direct_equal);
++  g_hash_table_add (painted_surfaces, surface);
++  if (g_hash_table_size (painted_surfaces) < expected_paints)
++    return;
+ 
+   /* Sync point to let parent test do checks */
++  sync_requested = TRUE;
+   test_driver_sync_point (display->test_driver, 0, NULL);
+   wait_for_sync_event (display, 0);
+   running = FALSE;
+@@ -196,9 +227,15 @@ main (int    argc,
+   struct wl_registry *registry;
+   TestDisplayState *test_state;
+   const char *session_id = NULL;
++  gboolean multiple_toplevels = FALSE;
+ 
+-  if (argc > 1)
+-    session_id = argv[1];
++  for (int i = 1; i < argc; i++)
++    {
++      if (g_str_equal (argv[i], "--multiple-toplevels"))
++        multiple_toplevels = TRUE;
++      else
++        session_id = argv[i];
++    }
+ 
+   display = wayland_display_new (WAYLAND_DISPLAY_CAPABILITY_TEST_DRIVER);
+   test_state = g_new0 (TestDisplayState, 1);
+@@ -214,7 +251,7 @@ main (int    argc,
+ 
+   g_assert_nonnull (test_state->session_manager);
+ 
+-  simple (display, session_id);
++  simple (display, session_id, multiple_toplevels);
+ 
+   return EXIT_SUCCESS;
+ }
+diff --git a/src/tests/wayland-xdg-session-management-tests.c b/src/tests/wayland-xdg-session-management-tests.c
+index aec91f533..1f30330ee 100644
+--- a/src/tests/wayland-xdg-session-management-tests.c
++++ b/src/tests/wayland-xdg-session-management-tests.c
+@@ -143,6 +143,78 @@ toplevel_sessions_restore (void)
+   meta_wayland_test_client_finish (wayland_test_client);
+ }
+ 
++static void
++toplevel_sessions_restore_multiple (void)
++{
++  MetaSessionManager *session_manager;
++  MetaBackend *backend = meta_context_get_backend (test_context);
++  ClutterActor *stage = meta_backend_get_stage (backend);
++  MetaWaylandTestClient *wayland_test_client;
++  MetaWindow *window1;
++  MetaWindow *window2;
++  MtkRectangle frame_rect;
++  g_autofree char *session_id = NULL;
++  MetaWindowWayland *wl_window;
++  uint32_t state_change_serial = 0U;
++
++  session_manager = meta_context_get_session_manager (test_context);
++  g_signal_connect (session_manager, "session-instantiated",
++                    G_CALLBACK (on_session_instantiated), &session_id);
++
++  wayland_test_client =
++    meta_wayland_test_client_new_with_args (
++      test_context, "xdg-session-management-restore",
++      "--multiple-toplevels", NULL);
++
++  wait_for_sync_point (0);
++  meta_wait_for_paint (CLUTTER_STAGE (stage));
++
++  window1 = meta_find_client_window (test_context, "toplevel1");
++  window2 = meta_find_client_window (test_context, "toplevel2");
++  g_assert_nonnull (window1);
++  g_assert_nonnull (window2);
++
++  meta_window_move_resize_frame (window1, FALSE, 25, 35, 240, 180);
++  meta_window_move_resize_frame (window2, FALSE, 310, 120, 260, 210);
++  meta_window_maximize (window2);
++
++  wl_window = META_WINDOW_WAYLAND (window2);
++  meta_window_wayland_get_pending_serial (wl_window, &state_change_serial);
++  g_assert_cmpint (state_change_serial, !=, 0U);
++  while (meta_window_wayland_peek_configuration (wl_window,
++                                                 state_change_serial))
++    g_main_context_iteration (NULL, TRUE);
++
++  meta_wayland_test_driver_emit_sync_event (test_driver, 0);
++  meta_wayland_test_client_finish (wayland_test_client);
++  g_assert_nonnull (session_id);
++
++  wayland_test_client =
++    meta_wayland_test_client_new_with_args (
++      test_context, "xdg-session-management-restore",
++      session_id, "--multiple-toplevels", NULL);
++
++  wait_for_sync_point (0);
++
++  window1 = meta_find_client_window (test_context, "toplevel1");
++  window2 = meta_find_client_window (test_context, "toplevel2");
++  g_assert_nonnull (window1);
++  g_assert_nonnull (window2);
++
++  frame_rect = meta_window_config_get_rect (window1->config);
++  g_assert_cmpint (frame_rect.x, ==, 25);
++  g_assert_cmpint (frame_rect.y, ==, 35);
++  g_assert_cmpint (frame_rect.width, ==, 240);
++  g_assert_cmpint (frame_rect.height, ==, 180);
++  g_assert_true (meta_window_is_maximized (window2));
++
++  g_signal_handlers_disconnect_by_func (session_manager,
++                                        on_session_instantiated,
++                                        &session_id);
++  meta_wayland_test_driver_emit_sync_event (test_driver, 0);
++  meta_wayland_test_client_finish (wayland_test_client);
++}
++
+ static void
+ toplevel_sessions_restore_fullscreen (void)
+ {
+@@ -625,6 +697,8 @@ init_tests (void)
+                    toplevel_sessions_replace);
+   g_test_add_func ("/wayland/toplevel/sessions/restore",
+                    toplevel_sessions_restore);
++  g_test_add_func ("/wayland/toplevel/sessions/restore-multiple",
++                   toplevel_sessions_restore_multiple);
+   g_test_add_func ("/wayland/toplevel/sessions/restore-tiled-fraction",
+                    toplevel_sessions_restore_tiled_fraction);
+ #ifdef MUTTER_PRIVILEGED_TEST
+@@ -648,7 +722,5 @@ int
+ main (int   argc,
+       char *argv[])
+ {
+-  g_setenv ("MUTTER_DEBUG_SESSION_MANAGEMENT_PROTOCOL", "1", TRUE);
+-
+   meta_run_wayland_tests (argc, argv, init_tests);
+ }
+diff --git a/src/tests/wayland-xdg-shell-tests.c b/src/tests/wayland-xdg-shell-tests.c
+index e8401b392..e8a85d60e 100644
+--- a/src/tests/wayland-xdg-shell-tests.c
++++ b/src/tests/wayland-xdg-shell-tests.c
+@@ -395,8 +395,8 @@ toplevel_bounds_monitors (void)
+ 
+   /*
+    * This test case creates two monitors, with different sizes, with a fake
+-   * panel on top of the primary monitor. It then makes sure launching on both
+-   * monitors results in the correct bounds.
++   * panel on top of the primary monitor. Luna places genuinely new Wayland
++   * toplevels on the primary monitor even when the pointer is elsewhere.
+    */
+ 
+   seat = meta_backend_get_default_seat (backend);
+@@ -450,12 +450,12 @@ toplevel_bounds_monitors (void)
+ 
+   g_assert_nonnull (window->monitor);
+   meta_window_get_work_area_current_monitor (window, &work_area);
+-  g_assert_cmpint (work_area.width, ==, 300);
+-  g_assert_cmpint (work_area.height, ==, 200);
++  g_assert_cmpint (work_area.width, ==, logical_monitor_layout.width);
++  g_assert_cmpint (work_area.height, ==, logical_monitor_layout.height - 10);
+ 
+   frame_rect = meta_window_config_get_rect (window->config);
+-  g_assert_cmpint (frame_rect.width, ==, 300 - 10);
+-  g_assert_cmpint (frame_rect.height, ==, 200 - 10);
++  g_assert_cmpint (frame_rect.width, ==, work_area.width - 10);
++  g_assert_cmpint (frame_rect.height, ==, work_area.height - 10);
+ 
+   meta_wayland_test_driver_emit_sync_event (test_driver, 0);
+   meta_wayland_test_client_finish (wayland_test_client);
 diff --git a/src/tests/xwayland-legacy-input-tests.c b/src/tests/xwayland-legacy-input-tests.c
 new file mode 100644
-index 0000000..44c3ba5
+index 000000000..44c3ba52f
 --- /dev/null
 +++ b/src/tests/xwayland-legacy-input-tests.c
 @@ -0,0 +1,567 @@
@@ -748,7 +1107,7 @@ index 0000000..44c3ba5
 +                                      META_TEST_RUN_FLAG_NONE);
 +}
 diff --git a/src/wayland/meta-wayland-keyboard.c b/src/wayland/meta-wayland-keyboard.c
-index 8d7849c..59d7d2d 100644
+index 8d7849c4d..59d7d2d1d 100644
 --- a/src/wayland/meta-wayland-keyboard.c
 +++ b/src/wayland/meta-wayland-keyboard.c
 @@ -52,6 +52,7 @@
@@ -1058,7 +1417,7 @@ index 8d7849c..59d7d2d 100644
  
    G_OBJECT_CLASS (meta_wayland_keyboard_parent_class)->finalize (object);
 diff --git a/src/wayland/meta-wayland-pointer.c b/src/wayland/meta-wayland-pointer.c
-index ec3447d..2031cdf 100644
+index ec3447dd3..2031cdf83 100644
 --- a/src/wayland/meta-wayland-pointer.c
 +++ b/src/wayland/meta-wayland-pointer.c
 @@ -46,7 +46,10 @@
@@ -1473,7 +1832,7 @@ index ec3447d..2031cdf 100644
  
    G_OBJECT_CLASS (meta_wayland_pointer_parent_class)->finalize (object);
 diff --git a/src/wayland/meta-wayland-pointer.h b/src/wayland/meta-wayland-pointer.h
-index 4cf9b6c..c0d9749 100644
+index 4cf9b6c9b..c0d974913 100644
 --- a/src/wayland/meta-wayland-pointer.h
 +++ b/src/wayland/meta-wayland-pointer.h
 @@ -99,6 +99,7 @@ MetaWaylandSurface * meta_wayland_pointer_get_current_surface (MetaWaylandPointe
@@ -1484,8 +1843,103 @@ index 4cf9b6c..c0d9749 100644
  void meta_wayland_pointer_focus_surface (MetaWaylandPointer *pointer,
                                           MetaWaylandSurface *surface);
  
+diff --git a/src/wayland/meta-wayland-xdg-session-manager.c b/src/wayland/meta-wayland-xdg-session-manager.c
+index e88bf47fb..ee2b3570f 100644
+--- a/src/wayland/meta-wayland-xdg-session-manager.c
++++ b/src/wayland/meta-wayland-xdg-session-manager.c
+@@ -334,38 +334,6 @@ bind_session_manager (struct wl_client *client,
+                                   session_manager, NULL);
+ }
+ 
+-static void
+-update_enabled (MetaWaylandXdgSessionManager *session_manager)
+-{
+-  MetaWaylandCompositor *compositor = session_manager->compositor;
+-  MetaDebugControl *debug_control =
+-    meta_context_get_debug_control (compositor->context);
+-  gboolean is_enabled;
+-
+-  is_enabled =
+-    meta_debug_control_is_session_management_protocol_enabled (debug_control);
+-
+-  if (is_enabled && !session_manager->global)
+-    {
+-      struct wl_display *wayland_display;
+-
+-      wayland_display =
+-        meta_wayland_compositor_get_wayland_display (compositor);
+-
+-      session_manager->global =
+-        wl_global_create (wayland_display,
+-                          &xx_session_manager_v1_interface,
+-                          META_XDG_SESSION_MANAGER_V1_VERSION,
+-                          session_manager, bind_session_manager);
+-      if (!session_manager->global)
+-        g_error ("Could not create session manager global");
+-    }
+-  else if (!is_enabled)
+-    {
+-      g_clear_pointer (&session_manager->global, wl_global_destroy);
+-    }
+-}
+-
+ static MetaWaylandXdgSessionManager *
+ meta_wayland_session_manager_new (MetaWaylandCompositor *compositor)
+ {
+@@ -393,41 +361,28 @@ meta_wayland_session_manager_free (MetaWaylandXdgSessionManager *session_manager
+   g_free (session_manager);
+ }
+ 
+-static void
+-on_protocol_enabled_changed (GObject    *object,
+-                             GParamSpec *pspec,
+-                             gpointer    user_data)
+-{
+-  MetaWaylandXdgSessionManager *session_manager = user_data;
+-
+-  update_enabled (session_manager);
+-}
+-
+ void
+ meta_wayland_xdg_session_management_init (MetaWaylandCompositor *compositor)
+ {
+-  MetaDebugControl *debug_control =
+-    meta_context_get_debug_control (compositor->context);
++  struct wl_display *wayland_display;
+ 
+   compositor->session_manager = meta_wayland_session_manager_new (compositor);
+ 
+-  g_signal_connect (debug_control, "notify::session-management-protocol",
+-                    G_CALLBACK (on_protocol_enabled_changed),
+-                    compositor->session_manager);
++  wayland_display =
++    meta_wayland_compositor_get_wayland_display (compositor);
+ 
+-  update_enabled (compositor->session_manager);
++  compositor->session_manager->global =
++    wl_global_create (wayland_display,
++                      &xx_session_manager_v1_interface,
++                      META_XDG_SESSION_MANAGER_V1_VERSION,
++                      compositor->session_manager, bind_session_manager);
++  if (!compositor->session_manager->global)
++    g_error ("Could not create session manager global");
+ }
+ 
+ void
+ meta_wayland_xdg_session_management_finalize (MetaWaylandCompositor *compositor)
+ {
+-  MetaDebugControl *debug_control =
+-    meta_context_get_debug_control (compositor->context);
+-
+-  g_signal_handlers_disconnect_by_func (debug_control,
+-                                        on_protocol_enabled_changed,
+-                                        compositor->session_manager);
+-
+   g_clear_pointer (&compositor->session_manager,
+                    meta_wayland_session_manager_free);
+ }
 diff --git a/src/wayland/meta-xwayland.c b/src/wayland/meta-xwayland.c
-index 2e2f7ad..fee0de5 100644
+index 2e2f7ad06..fee0de576 100644
 --- a/src/wayland/meta-xwayland.c
 +++ b/src/wayland/meta-xwayland.c
 @@ -65,6 +65,14 @@
@@ -1513,7 +1967,7 @@ index 2e2f7ad..fee0de5 100644
    args[i++] = "-rootless";
    args[i++] = "-noreset";
 diff --git a/src/wayland/meta-xwayland.h b/src/wayland/meta-xwayland.h
-index ed8540a..9b870d5 100644
+index ed8540ad2..9b870d542 100644
 --- a/src/wayland/meta-xwayland.h
 +++ b/src/wayland/meta-xwayland.h
 @@ -28,6 +28,9 @@
@@ -1528,7 +1982,7 @@ index ed8540a..9b870d5 100644
  meta_xwayland_override_display_number (int number);
 diff --git a/src/wayland/protocol/mutter-unmuted-v1.xml b/src/wayland/protocol/mutter-unmuted-v1.xml
 new file mode 100644
-index 0000000..72c8227
+index 000000000..72c8227c9
 --- /dev/null
 +++ b/src/wayland/protocol/mutter-unmuted-v1.xml
 @@ -0,0 +1,29 @@

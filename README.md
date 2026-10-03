@@ -10,9 +10,10 @@ the empty desktop, overview, app grid and Shell menus.
 
 **Forward while unlocked. Stop at the lock screen.**
 
-This is an experimental community patch, tested with **Mutter 50.4 / GNOME Shell
-50.4 and Xwayland 24.1.13 on Nobara 44**. The installer detects the installed
-version of each component and builds both from matching distribution sources.
+This is an experimental community patch, targeting this session's **Mutter
+50.4 / GNOME Shell 50.5 and Xwayland 24.1.13 on Nobara 44**. The installer
+verifies the installed version of each component and builds both from matching
+distribution sources.
 It is inspired by KDE's legacy X11 input support and is not an official GNOME,
 KDE or Discord project.
 
@@ -42,8 +43,19 @@ implement the Global Shortcuts portal. It does not add portal support to Discord
 - Releases forwarded holds and blocks new forwarded input when GNOME locks.
 - Preserves normal input delivery and avoids duplicate delivery to focused Xwayland.
 - Uses persistent GSettings controls. Both features default to **off**.
+- Exposes Mutter 50.4's native Wayland session-management protocol without the
+  upstream debug-only environment switch, so cooperating applications can
+  restore each independently named window's size, position, monitor and state.
+- Centers genuinely new, unpositioned Wayland application windows on the
+  primary monitor; restored windows bypass new-window placement.
 
 Primary mouse buttons and scrolling are not forwarded by this feature.
+
+Wayland window restoration is cooperative. An application must use a stable
+session ID and a distinct toplevel name for each window through Mutter's
+session-management protocol. Mutter Unmuted deliberately does not guess window
+identity from an application ID or mutable title. Multiple windows from the
+same application are covered by the compositor regression tests.
 
 ## Build and install
 
@@ -81,7 +93,7 @@ automatically. Run the script without sudo. It leaves forwarding disabled by
 default and preserves existing settings.
 
 See [the build guide](docs/BUILDING.md) for manual steps or other distributions.
-Built packages keep each installed upstream version and add `.unmuted3` to its
+Built packages keep each installed upstream version and add `.unmuted5` to its
 distribution release. Re-running the installer rebuilds and reinstalls that local release.
 
 This repository contains source and packaging, not prebuilt RPMs. Automatic
@@ -101,16 +113,11 @@ git pull --ff-only
 
 Then **log out and back in**. Existing forwarding settings carry over.
 
-Use the same commands after a distribution update to **either Mutter or
-Xwayland**. The installer detects both currently installed versions, fetches
-matching sources, reapplies both patches, and tests the pair before installing
-it. You do not need to edit version numbers manually.
-
-Version detection does not guarantee every future release is compatible. If
+This revision intentionally refuses a different Mutter, GNOME Shell, or
+Xwayland version. Rebase and validate the patch before changing that guard. If
 sources are unavailable, a patch conflicts, or paired tests fail, the installer
 stops before installing either local build. No version pinning or background
-updater is added. Until both patches are present again, seamless handoff is not
-assured.
+updater is added.
 
 ## Enable it
 
@@ -236,7 +243,8 @@ running a full GNOME authentication screen. See [validation details](docs/VALIDA
 
 ## Repository contents
 
-- `patches/`: Mutter implementation/tests and the coordinated Xwayland patch.
+- `patches/`: Mutter 50.4 input and Wayland-window implementation/tests, plus
+  the coordinated Xwayland patch.
 - `packaging/nobara/`: RPM spec and the existing Nobara patches/schema override.
 - `install.sh`: version detection, source acquisition, dependencies and paired installation.
 - `tools/`: spec adaptation and an independent native Wayland test window.

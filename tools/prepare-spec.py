@@ -16,11 +16,11 @@ def prepare(text, version, release, package="mutter"):
     if not re.search(r'^%prep\b', text, re.M) or not re.search(r'^%install\b', text, re.M):
         raise ValueError('Missing expected RPM sections; manual adaptation is required.')
     # Rebuilding our previous SRPM replaces the existing patch instead of applying it twice.
-    text = re.sub(r'^Patch\d*:\s*.*(?:mutter-50\.4-legacy-input|mutter-unmuted|xwayland-unmuted)\.patch\s*$', '', text, flags=re.M)
+    text = re.sub(r'^Patch\d*:\s*.*(?:mutter-50\.4-(?:legacy-input|unmuted)|mutter-unmuted|xwayland-unmuted)\.patch\s*$', '', text, flags=re.M)
     text, count = re.subn(r'^Version:\s*.*$', f'Version: {version}', text, count=1, flags=re.M)
     if count != 1:
         raise ValueError('Missing Version tag.')
-    text, count = re.subn(r'^Release:\s*.*$', f'Release: {release}.unmuted3', text, count=1, flags=re.M)
+    text, count = re.subn(r'^Release:\s*.*$', f'Release: {release}.unmuted5', text, count=1, flags=re.M)
     if count != 1:
         raise ValueError('Missing Release tag.')
     # Explicitly numbered high patch avoids collisions with distro auto numbering.
@@ -32,8 +32,11 @@ def prepare(text, version, release, package="mutter"):
     if package == 'xwayland':
         # Keep distribution checks; paired Mutter tests exercise this RPM's binary.
         return text
-    check = 'env -u GDK_BACKEND -u XAUTHORITY meson test -C %{_vpath_builddir} xwayland xwayland-legacy-input --print-errorlogs'
-    if 'xwayland-legacy-input --print-errorlogs' not in text:
+    check = 'env -u GDK_BACKEND -u XAUTHORITY meson test -C %{_vpath_builddir} xwayland xwayland-legacy-input wayland-xdg-session-management --print-errorlogs'
+    text = re.sub(
+        r'^env -u GDK_BACKEND -u XAUTHORITY meson test -C %\{_vpath_builddir\} xwayland xwayland-legacy-input(?: wayland-xdg-session-management)? --print-errorlogs$',
+        check, text, flags=re.M)
+    if 'xwayland-legacy-input wayland-xdg-session-management --print-errorlogs' not in text:
         if re.search(r'^%check\s*$', text, re.M):
             text = re.sub(r'^%check\s*$', '%check\n' + check, text, count=1, flags=re.M)
         else:

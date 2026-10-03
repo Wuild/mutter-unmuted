@@ -10,6 +10,7 @@ arch=$5
 jobs=$6
 assume_yes=$7
 source_rpm=$8
+skip_dependency_install=$9
 mkdir -p "$build_root"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS,download,extracted}
 flags=()
 $assume_yes && flags+=(-y)
@@ -34,7 +35,9 @@ rpm -i --define "_topdir $build_root" "$source_rpm"
 spec="$build_root/SPECS/xorg-x11-server-Xwayland.spec"
 python3 "$root/tools/prepare-spec.py" "$spec" "$version" "$release" xwayland
 cp "$root/patches/xwayland-unmuted.patch" "$build_root/SOURCES/"
-sudo dnf builddep "${flags[@]}" "$spec"
+if ! $skip_dependency_install; then
+  sudo dnf builddep "${flags[@]}" "$spec"
+fi
 echo "Building Xwayland $version; log: $build_root/build.log"
 if ! rpmbuild -ba --define "_topdir $build_root" --define "_smp_build_ncpus $jobs" "$spec" > "$build_root/build.log" 2>&1; then
   tail -n 60 "$build_root/build.log" >&2
